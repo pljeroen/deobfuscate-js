@@ -34,39 +34,21 @@ export interface Token {
   column: number;
 }
 
-// AST node types (subset sufficient for de-obfuscation)
-export type ASTNode =
-  | Program
-  | Statement
-  | Expression
-  | Declaration;
+import type { File } from "@babel/types";
 
-export interface Program {
-  type: "Program";
-  body: Statement[];
-  start: number;
-  end: number;
+// AST-based pass interface (operates on Babel AST)
+export interface ASTPass {
+  name: string;
+  description: string;
+  run(ast: File): File;
 }
 
-// Placeholder — will be expanded as we build the parser
-export interface Statement {
-  type: string;
-  [key: string]: unknown;
-}
-
-export interface Expression {
-  type: string;
-  [key: string]: unknown;
-}
-
-export interface Declaration {
-  type: string;
-  [key: string]: unknown;
-}
-
-// Pipeline pass interface
-export interface DeobfuscationPass {
+// Token-based pass interface (operates on source string)
+export interface TokenPass {
   name: string;
   description: string;
   run(input: string): string;
 }
+
+// Legacy alias
+export type DeobfuscationPass = TokenPass;

@@ -6,94 +6,69 @@ Target: `lodash.min.js` v4.17.23 (73,320 bytes, 139 lines)
 
 | Metric | Input | Output | Change |
 |---|---|---|---|
-| Lines | 139 | 2,519 | 18x |
-| Bytes | 73,320 | 127,378 | 1.7x |
-| Tokens | 40,862 | 59,900 | +47% |
-| Single-letter identifiers | 8,507 (65%) | 2,494 (19%) | -71% |
+| Lines | 139 | 2,355 | 17x |
+| Bytes | 73,320 | 160,729 | 2.2x |
+| Tokens | 40,862 | ~65,000 | +59% |
+| Single-letter identifiers | 8,507 (65%) | 759 (4%) | -91% |
 | Boolean idioms (`!0`, `!1`) | 113 | 0 | -100% |
 
 Output passes `node --check` — syntactically valid JavaScript.
 
 ## Pipeline
 
-Three sequential passes, all operating at the token level. No AST parser, no
-external dependencies.
+Two-phase architecture: AST transforms first, then token-level formatting.
 
-### 1. Simplify
+### Phase 1: AST Transforms
 
-Reverses common minification idioms:
+Parses source once with `@babel/parser`, applies six transforms via
+`@babel/traverse`, generates output once with `@babel/generator`.
 
-| Pattern | Replacement |
+| Pass | Function |
 |---|---|
-| `!0` | `true` |
-| `!1` | `false` |
-| `void 0` | `undefined` |
-| Comma expressions `a,b,c;` | Separate statements `a;\nb;\nc;` |
+| Constant folding | `1+2` -> `3`, `!0` -> `true`, `void 0` -> `undefined` |
+| Constant propagation | Inline single-assignment const/var with literal values |
+| Dead code elimination | Remove `if(false)`, unreachable code, unused variables |
+| Hex/unicode decoding | `\x48\x65\x6c\x6c\x6f` -> `Hello` |
+| Simplification | Split comma expressions, `obj["prop"]` -> `obj.prop` |
+| Scope-aware renaming | Babel scope analysis for correct lexical renaming |
 
-Comma expression splitting works inside function bodies, not just top-level.
-Correctly handles brace-less control structure bodies (`if`/`else`/`for`/`while`/`do`)
-and preserves `return`/`throw` comma expressions.
+### Phase 2: Token-Level Formatting
 
-Guards against false positives: commas inside `()`, `[]`, `{}`, and
-`var`/`let`/`const` declarations are preserved.
-
-### 2. Rename
-
-Replaces single-letter and two-letter minified variable names with descriptive
-names from a fixed vocabulary (`value`, `other`, `result`, `data`, `key`, ...).
-
-- Scoped per function: each function's params and locals are renamed
-  independently
-- Inner scopes take precedence over outer scopes (no duplicate param names)
-- Conventional names preserved: `i`, `j`, `k`, `_`, `$`
-- Property access (`.foo`) and object keys (`{a: 1}`) are not renamed
-- Well-known globals (`Array`, `Object`, `Math`, etc.) are not renamed
-
-### 3. Format
-
-Tokenizes input, strips original whitespace, re-emits with:
-
-- Newlines after `;`, `{`, `}`
-- 2-space indentation tracking brace depth
-- Spaces around binary/assignment operators and after commas
-- Keyword-to-word spacing (`if (`, `for (`, `while (`, `return value`)
-- Unary minus handling (no space after `-` in unary context)
-- For-loop awareness: semicolons inside `for(;;)` do not trigger line breaks
+Custom tokenizer + format pass for indentation, line breaks, operator
+spacing, keyword spacing, and context-aware unary handling.
 
 ## Tooling
 
 | Component | Lines | Purpose |
 |---|---|---|
+| `src/babel.ts` | 15 | Babel ESM/CJS interop |
+| `src/parser.ts` | 24 | Babel parse + generate wrappers |
+| `src/pipeline.ts` | 40 | Dual-mode pipeline (AST + token) |
+| `src/types.ts` | 39 | Token types, pass interfaces |
 | `src/tokenizer.ts` | 244 | From-scratch JS lexer |
-| `src/passes/simplify.ts` | 265 | Idiom reversal |
-| `src/passes/rename.ts` | 304 | Scoped variable renaming |
-| `src/passes/format.ts` | 284 | Pretty-printer |
-| `src/pipeline.ts` | 13 | Sequential pass runner |
-| `src/types.ts` | 72 | Token/AST/pass type definitions |
-| `src/index.ts` | 28 | CLI entry point |
-| **Total source** | **1,210** | |
-| **Total tests** | **513** (80 tests) | |
+| `src/passes/constant-fold.ts` | 155 | Static expression evaluation |
+| `src/passes/constant-propagate.ts` | 55 | Single-assignment inlining |
+| `src/passes/dead-code-eliminate.ts` | 118 | Unreachable code removal |
+| `src/passes/hex-decode.ts` | 38 | String escape decoding |
+| `src/passes/ast-simplify.ts` | 62 | Comma splitting, member access |
+| `src/passes/ast-rename.ts` | 75 | Babel scope-aware renaming |
+| `src/passes/format.ts` | 309 | Token-level pretty-printer |
+| `src/index.ts` | 30 | CLI entry point |
+| **Total source** | **~1,200** | |
+| **Total tests** | **~700** (194 tests) | |
 
-Zero external dependencies for de-obfuscation logic. Dev tooling only:
-TypeScript, tsx, vitest.
+Runtime dependencies: `@babel/parser`, `@babel/traverse`, `@babel/types`,
+`@babel/generator`. Dev tooling only: TypeScript, tsx, vitest.
 
 ## Limitations
 
-- **No AST**: operates at token level, so cannot distinguish all syntactic
-  contexts perfectly (e.g., ternary `:` vs object key `:`)
-- **Rename vocabulary is generic**: names like `value`, `other` are better than
-  `n`, `t` but don't reflect actual semantics
-- **No constant inlining**: string constants like `Dn = "[object Arguments]"`
-  are not inlined at usage sites
-- **No function name recovery**: `_.map = function(...)` could infer the name
-  `map` but currently does not
-- **Long lines**: some statements with many chained expressions remain on
-  single lines
-
-## Possible improvements
-
-1. Context-aware renaming (variables compared to `.length` -> `len`, loop
-   counters -> `index`)
-2. Constant inlining for string/number literals assigned once and used as tags
-3. Function name recovery from property assignment patterns
-4. Line-length-aware wrapping
+- **No string array resolution**: obfuscator.io-style string arrays with
+  rotation and decoder functions are not yet handled
+- **No control flow unflattening**: `while(true){switch(state){...}}`
+  patterns remain as-is
+- **No proxy function inlining**: wrapper functions are not detected or inlined
+- **No bundler unpacking**: webpack/browserify module wrappers not extracted
+- **Rename vocabulary is generic**: names like `value`, `other` are better
+  than `n`, `t` but don't reflect actual semantics
+- **Single-pass pipeline**: transforms run once; iterative convergence not
+  yet implemented

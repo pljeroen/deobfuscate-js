@@ -1,23 +1,23 @@
 import { describe, it, expect } from "vitest";
-import { runPipeline } from "../src/pipeline.js";
-import { DeobfuscationPass } from "../src/types.js";
+import { runTokenPipeline } from "../src/pipeline.js";
+import type { TokenPass } from "../src/types.js";
 
-describe("pipeline", () => {
+describe("token pipeline", () => {
   it("returns input unchanged when no passes are given", () => {
-    expect(runPipeline("var x = 1;", [])).toBe("var x = 1;");
+    expect(runTokenPipeline("var x = 1;", [])).toBe("var x = 1;");
   });
 
   it("runs passes in sequence", () => {
-    const upper: DeobfuscationPass = {
+    const upper: TokenPass = {
       name: "upper",
       description: "uppercase",
       run: (s) => s.toUpperCase(),
     };
-    const exclaim: DeobfuscationPass = {
+    const exclaim: TokenPass = {
       name: "exclaim",
       description: "add exclamation",
       run: (s) => s + "!",
     };
-    expect(runPipeline("hello", [upper, exclaim])).toBe("HELLO!");
+    expect(runTokenPipeline("hello", [upper, exclaim])).toBe("HELLO!");
   });
 });
