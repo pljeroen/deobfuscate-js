@@ -16,6 +16,7 @@ import { controlFlowObjectPass } from "./passes/control-flow-object.js";
 import { controlFlowUnflattenPass } from "./passes/control-flow-unflatten.js";
 import { stringArrayPass } from "./passes/string-array.js";
 import { bundlerUnpackPass } from "./passes/bundler-unpack.js";
+import { semanticRenamePass } from "./passes/semantic-rename.js";
 import { formatPass } from "./passes/format.js";
 
 const inputPath = process.argv[2] ?? resolve("input/lodash.min.js");
@@ -25,7 +26,7 @@ const source = readFileSync(inputPath, "utf-8");
 
 const result = runPipeline(
   source,
-  [bundlerUnpackPass, constantFoldPass, constantPropagatePass, deadCodeEliminatePass, hexDecodePass, stringArrayPass, controlFlowObjectPass, controlFlowUnflattenPass, astSimplifyPass, astRenamePass],
+  [bundlerUnpackPass, constantFoldPass, constantPropagatePass, deadCodeEliminatePass, hexDecodePass, stringArrayPass, controlFlowObjectPass, controlFlowUnflattenPass, astSimplifyPass, semanticRenamePass, astRenamePass],
   [formatPass],
 );
 

@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### Added
+- Iterative convergence pipeline: AST passes repeat until output stabilizes
+  or max iterations reached (fixpoint detection via string comparison)
+- Obfuscator fingerprinting: pattern-based detection of javascript-obfuscator
+  (hex identifiers, string array + decoder, control flow flattening)
+- Semantic variable renaming: context-aware naming for obfuscated variables
+  (loop counters → i/j/k, .length → len, error-first callbacks → err)
+- Safe/unsafe pass classification: `safety` field on ASTPass interface,
+  `filterSafePasses()` utility, stringArrayPass marked as unsafe
+- Multi-parser fallback: errorRecovery + sourceType fallback + line truncation
+  for malformed JavaScript input
 - Control flow unflattening pass: reconstructs linear control flow from
   while/switch dispatch pattern (javascript-obfuscator's controlFlowFlattening)
 - Bundler unpacking pass: detects and extracts modules from webpack 4/5
@@ -16,7 +26,7 @@
   control flow storage objects (binary/logical proxy functions, call delegation,
   string literals)
 - Support for transformObjectKeys pattern (empty object + sequential assignments)
-- 63 new tests for structural deobfuscation passes (257 total)
+- 24 new tests for pipeline intelligence (281 total)
 
 ## [0.2.0] - 2026-02-19
 

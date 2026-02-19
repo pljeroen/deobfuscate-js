@@ -40,6 +40,7 @@ import type { File } from "@babel/types";
 export interface ASTPass {
   name: string;
   description: string;
+  safety?: "safe" | "unsafe";
   run(ast: File): File;
 }
 

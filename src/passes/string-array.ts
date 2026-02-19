@@ -24,6 +24,7 @@ const generateNode: typeof _generate = (_generate as any).default ?? _generate;
 export const stringArrayPass: ASTPass = {
   name: "string-array",
   description: "Resolve string array obfuscation (decoder functions, rotation, encoding)",
+  safety: "unsafe",
 
   run(ast: File): File {
     const pattern = detectPattern(ast);

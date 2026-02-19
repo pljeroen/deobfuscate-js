@@ -9,13 +9,38 @@
 import type { ASTPass, TokenPass } from "./types.js";
 import { parse, generate } from "./parser.js";
 
-/** Run AST passes: parse once, transform N times, generate once. */
-export function runASTPipeline(source: string, passes: ASTPass[]): string {
+export interface ASTPipelineOptions {
+  maxIterations?: number;
+}
+
+/**
+ * Run AST passes with iterative convergence.
+ * Repeats all passes until the output stabilizes or maxIterations is reached.
+ */
+export function runASTPipeline(
+  source: string,
+  passes: ASTPass[],
+  options?: ASTPipelineOptions,
+): string {
+  const maxIterations = options?.maxIterations ?? 1;
   let ast = parse(source);
-  for (const pass of passes) {
-    ast = pass.run(ast);
+  let previousCode = "";
+
+  for (let i = 0; i < maxIterations; i++) {
+    for (const pass of passes) {
+      ast = pass.run(ast);
+    }
+    const currentCode = generate(ast);
+    if (currentCode === previousCode) {
+      return currentCode;
+    }
+    previousCode = currentCode;
+    if (i < maxIterations - 1) {
+      ast = parse(currentCode);
+    }
   }
-  return generate(ast);
+
+  return previousCode;
 }
 
 /** Run token-level passes sequentially on a string. */
@@ -35,4 +60,9 @@ export function runPipeline(
 ): string {
   const afterAST = runASTPipeline(source, astPasses);
   return runTokenPipeline(afterAST, tokenPasses);
+}
+
+/** Filter out passes marked as unsafe. Passes without a safety field are treated as safe. */
+export function filterSafePasses(passes: ASTPass[]): ASTPass[] {
+  return passes.filter(p => p.safety !== "unsafe");
 }
