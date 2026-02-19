@@ -1,0 +1,25 @@
+{
+  "name": "deobfuscate-js",
+  "version": "0.1.0",
+  "description": "From-scratch JavaScript de-obfuscation toolkit",
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "deobfuscate": "tsx src/index.ts",
+    "tokenize": "tsx src/cli/tokenize.ts"
+  },
+  "keywords": ["javascript", "deobfuscation", "minification", "reverse-engineering"],
+  "author": "Jeroen",
+  "license": "MIT",
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^25.3.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  },
+  "dependencies": {
+    "lodash": "^4.17.23"
+  }
+}
