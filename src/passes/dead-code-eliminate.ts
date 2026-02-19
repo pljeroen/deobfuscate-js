@@ -98,6 +98,7 @@ export const deadCodeEliminatePass: ASTPass = {
       VariableDeclaration(path) {
         const declarators = path.get("declarations");
         const toRemove: number[] = [];
+        const isNested = !!path.getFunctionParent();
 
         for (let i = 0; i < declarators.length; i++) {
           const decl = declarators[i];
@@ -113,7 +114,7 @@ export const deadCodeEliminatePass: ASTPass = {
 
           // Check if initializer has side effects
           const init = decl.get("init");
-          if (init.node && !isPure(init.node)) continue;
+          if (init.node && !isPure(init.node, isNested)) continue;
 
           toRemove.push(i);
         }
@@ -128,6 +129,9 @@ export const deadCodeEliminatePass: ASTPass = {
         }
       },
     });
+
+    // Refresh scope info after Pass 3 mutations before Pass 4
+    traverse(ast, { Program(path) { path.scope.crawl(); } });
 
     // Pass 4: Remove unreferenced nested function declarations (scoped wrappers etc.)
     // Only removes functions inside other functions — top-level may be exports.
@@ -148,19 +152,26 @@ export const deadCodeEliminatePass: ASTPass = {
   },
 };
 
-function isPure(node: t.Node): boolean {
+function isPure(node: t.Node, allowIIFE = false): boolean {
   if (t.isLiteral(node)) return true;
   if (t.isIdentifier(node)) return true;
   if (t.isFunctionExpression(node) || t.isArrowFunctionExpression(node)) return true;
-  if (t.isUnaryExpression(node) && isPure(node.argument)) return true;
-  if (t.isBinaryExpression(node) && isPure(node.left) && isPure(node.right)) return true;
+  if (t.isUnaryExpression(node) && isPure(node.argument, allowIIFE)) return true;
+  if (t.isBinaryExpression(node) && isPure(node.left, allowIIFE) && isPure(node.right, allowIIFE)) return true;
   if (t.isArrayExpression(node)) {
-    return node.elements.every((el) => el === null || (t.isNode(el) && isPure(el)));
+    return node.elements.every((el) => el === null || (t.isNode(el) && isPure(el, allowIIFE)));
   }
   if (t.isObjectExpression(node)) {
     return node.properties.every(
-      (p) => t.isObjectProperty(p) && isPure(p.value as t.Node)
+      (p) => t.isObjectProperty(p) && isPure(p.value as t.Node, allowIIFE)
     );
   }
+  // IIFE with no arguments inside functions: (function(){...})() — closures are
+  // self-contained. Only allowed inside functions (not top-level) to avoid removing
+  // module-wrapping IIFEs that may have global side effects.
+  // Handles obfuscator.io "call controller" (apply-once wrapper) pattern.
+  if (allowIIFE && t.isCallExpression(node) &&
+      (t.isFunctionExpression(node.callee) || t.isArrowFunctionExpression(node.callee)) &&
+      node.arguments.length === 0) return true;
   return false;
 }

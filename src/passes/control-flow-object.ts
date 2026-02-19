@@ -195,7 +195,10 @@ function mergeSequentialAssignments(ast: File): void {
         }
         if (!propName) break;
 
-        objExpr.properties.push(t.objectProperty(t.identifier(propName), expr.right));
+        const key = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(propName)
+          ? t.identifier(propName)
+          : t.stringLiteral(propName);
+        objExpr.properties.push(t.objectProperty(key, expr.right, !t.isIdentifier(key)));
         toRemove.push(sib);
       }
 

@@ -27,7 +27,7 @@ const source = readFileSync(inputPath, "utf-8");
 
 const result = runPipeline(
   source,
-  [bundlerUnpackPass, constantFoldPass, constantPropagatePass, deadCodeEliminatePass, hexDecodePass, stringArrayPass, controlFlowObjectPass, controlFlowUnflattenPass, antiDebugPass, astSimplifyPass, semanticRenamePass, astRenamePass],
+  [bundlerUnpackPass, constantFoldPass, constantPropagatePass, deadCodeEliminatePass, hexDecodePass, stringArrayPass, controlFlowObjectPass, controlFlowUnflattenPass, antiDebugPass, constantPropagatePass, deadCodeEliminatePass, astSimplifyPass, semanticRenamePass, astRenamePass],
   [formatPass],
 );
 

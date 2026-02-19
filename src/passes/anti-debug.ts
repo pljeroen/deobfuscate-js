@@ -70,6 +70,7 @@ export const antiDebugPass: ASTPass = {
     });
 
     // Phase 3: Remove calls/references to removed names — direct calls, setInterval, IIFEs containing them
+    // Also handles SequenceExpressions (comma operator) by filtering individual sub-expressions.
     let changed = true;
     while (changed) {
       changed = false;
@@ -77,49 +78,26 @@ export const antiDebugPass: ASTPass = {
         ExpressionStatement(path) {
           const expr = path.node.expression;
 
-          // Direct call to removed function: removedName(...)
-          if (t.isCallExpression(expr) && t.isIdentifier(expr.callee) && removedNames.has(expr.callee.name)) {
-            path.remove();
-            changed = true;
+          // Handle SequenceExpressions: (iife(), console.log()) — filter removable sub-expressions
+          if (t.isSequenceExpression(expr)) {
+            const exprs = expr.expressions;
+            for (let i = exprs.length - 1; i >= 0; i--) {
+              if (isRemovableExpr(exprs[i], removedNames)) {
+                exprs.splice(i, 1);
+                changed = true;
+              }
+            }
+            if (exprs.length === 0) {
+              path.remove();
+            } else if (exprs.length === 1) {
+              path.node.expression = exprs[0];
+            }
             return;
           }
 
-          // setInterval(removedName, ...) or setInterval(function() { removedName() }, ...)
-          if (
-            t.isCallExpression(expr) &&
-            t.isIdentifier(expr.callee) &&
-            expr.callee.name === "setInterval" &&
-            expr.arguments.length >= 1
-          ) {
-            const firstArg = expr.arguments[0];
-            if (t.isIdentifier(firstArg) && removedNames.has(firstArg.name)) {
-              path.remove();
-              changed = true;
-              return;
-            }
-          }
-
-          // IIFE containing call to removed function
-          if (t.isCallExpression(expr)) {
-            const callee = expr.callee;
-            if (t.isFunctionExpression(callee) || t.isArrowFunctionExpression(callee)) {
-              if (referencesAny(callee, removedNames)) {
-                path.remove();
-                changed = true;
-                return;
-              }
-            }
-            // Nested IIFE: (function() { innerCall(this, function() { ... })() })()
-            if (t.isCallExpression(callee)) {
-              const inner = callee.callee;
-              if (t.isFunctionExpression(inner) || t.isArrowFunctionExpression(inner)) {
-                if (referencesAny(inner, removedNames)) {
-                  path.remove();
-                  changed = true;
-                  return;
-                }
-              }
-            }
+          if (isRemovableExpr(expr, removedNames)) {
+            path.remove();
+            changed = true;
           }
         },
       });
@@ -173,11 +151,11 @@ function containsConstructorTrap(path: NodePath<t.FunctionDeclaration>): boolean
       if (found) return;
       const val = innerPath.node.value;
       if (val !== "debugger" && val !== "while (true) {}") return;
+      const callee = innerPath.parent;
       if (
-        t.isCallExpression(innerPath.parent) &&
-        t.isMemberExpression(innerPath.parent.callee) &&
-        t.isIdentifier(innerPath.parent.callee.property) &&
-        innerPath.parent.callee.property.name === "constructor"
+        t.isCallExpression(callee) &&
+        t.isMemberExpression(callee.callee) &&
+        isPropertyNamed(callee.callee, "constructor")
       ) {
         found = true;
       }
@@ -275,22 +253,51 @@ function referencesAny(fn: t.FunctionExpression | t.ArrowFunctionExpression, nam
   return found;
 }
 
+/** Check if an expression is a removable anti-debug artifact */
+function isRemovableExpr(expr: t.Expression, removedNames: Set<string>): boolean {
+  // Direct call to removed function: removedName(...)
+  if (t.isCallExpression(expr) && t.isIdentifier(expr.callee) && removedNames.has(expr.callee.name)) {
+    return true;
+  }
+
+  // setInterval(removedName, ...)
+  if (
+    t.isCallExpression(expr) &&
+    t.isIdentifier(expr.callee) &&
+    expr.callee.name === "setInterval" &&
+    expr.arguments.length >= 1
+  ) {
+    const firstArg = expr.arguments[0];
+    if (t.isIdentifier(firstArg) && removedNames.has(firstArg.name)) {
+      return true;
+    }
+  }
+
+  // IIFE containing call to removed function
+  if (t.isCallExpression(expr)) {
+    const callee = expr.callee;
+    if (t.isFunctionExpression(callee) || t.isArrowFunctionExpression(callee)) {
+      if (referencesAny(callee, removedNames)) return true;
+    }
+    // Nested IIFE: (function() { innerCall(this, function() { ... })() })()
+    if (t.isCallExpression(callee)) {
+      const inner = callee.callee;
+      if (t.isFunctionExpression(inner) || t.isArrowFunctionExpression(inner)) {
+        if (referencesAny(inner, removedNames)) return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 function isObfuscatedName(name: string): boolean {
   return /^_0x[0-9a-f]+$/i.test(name);
 }
 
-function removeVarAndCalls(path: NodePath<t.VariableDeclaration>, name: string): void {
-  const siblings = path.getAllNextSiblings();
-  for (const sib of siblings) {
-    if (!t.isExpressionStatement(sib.node)) continue;
-    if (
-      t.isCallExpression(sib.node.expression) &&
-      t.isIdentifier(sib.node.expression.callee) &&
-      sib.node.expression.callee.name === name
-    ) {
-      sib.remove();
-      break;
-    }
-  }
-  path.remove();
+/** Check if a member expression property matches a name (handles both .prop and ["prop"]) */
+function isPropertyNamed(node: t.MemberExpression, name: string): boolean {
+  if (!node.computed && t.isIdentifier(node.property) && node.property.name === name) return true;
+  if (node.computed && t.isStringLiteral(node.property) && node.property.value === name) return true;
+  return false;
 }

@@ -33,10 +33,11 @@ export const stringArrayPass: ASTPass = {
     if (!pattern) return ast;
 
     try {
-      const resolved = resolveViaSandbox(pattern);
-      if (!resolved || resolved.size === 0) return ast;
+      const result = resolveViaSandbox(pattern);
+      if (!result || result.resolved.size === 0) return ast;
 
-      inlineResolvedCalls(ast, pattern, resolved);
+      inlineResolvedCalls(ast, pattern, result);
+      removeAliasDeclarations(ast, pattern);
       removeSetupStatements(ast, pattern);
     } catch {
       // Sandbox execution failed (timeout, syntax error, etc.) — skip this pass
@@ -325,14 +326,21 @@ function detectPattern(ast: File, source?: string): StringArrayPattern | null {
 
 // --- Sandbox execution ---
 
-function resolveViaSandbox(pattern: StringArrayPattern): Map<string, string> | null {
+interface SandboxResult {
+  resolved: Map<string, string>;
+  /** Keys where the call executed but returned a non-string value (e.g., undefined) */
+  failed: Set<string>;
+}
+
+function resolveViaSandbox(pattern: StringArrayPattern): SandboxResult | null {
   const calls = [...pattern.uniqueCalls.entries()];
   if (calls.length === 0) return null;
 
-  // Wrap each call in try-catch so one failure doesn't block others
+  // Wrap each call in try-catch. Store string results directly; mark non-string
+  // results as null so we can distinguish "returned non-string" from "threw error".
   const resultAssignments = calls
     .map(([key, callSource]) =>
-      `try { __results[${JSON.stringify(key)}] = ${callSource}; } catch(e) {}`)
+      `try { var __v = ${callSource}; __results[${JSON.stringify(key)}] = typeof __v === "string" ? __v : null; } catch(e) {}`)
     .join("\n");
 
   const script = `
@@ -349,13 +357,17 @@ process.stdout.write(JSON.stringify(__results));
   const results: Record<string, unknown> = JSON.parse(output);
 
   const resolved = new Map<string, string>();
+  const failed = new Set<string>();
   for (const [key, value] of Object.entries(results)) {
     if (typeof value === "string") {
       resolved.set(key, value);
+    } else {
+      // Call executed but returned non-string (undefined, number, etc.)
+      failed.add(key);
     }
   }
 
-  return resolved.size > 0 ? resolved : null;
+  return resolved.size > 0 || failed.size > 0 ? { resolved, failed } : null;
 }
 
 // --- Inlining ---
@@ -363,7 +375,7 @@ process.stdout.write(JSON.stringify(__results));
 function inlineResolvedCalls(
   ast: File,
   pattern: StringArrayPattern,
-  resolved: Map<string, string>,
+  result: SandboxResult,
 ): void {
   traverse(ast, {
     CallExpression(path) {
@@ -374,10 +386,45 @@ function inlineResolvedCalls(
         .map(a => generateNode(a as any).code)
         .join(",");
       const key = callee.name + ":" + argsKey;
-      const value = resolved.get(key);
+      const value = result.resolved.get(key);
       if (value !== undefined) {
         path.replaceWith(t.stringLiteral(value));
+      } else if (result.failed.has(key)) {
+        // Call executed but returned non-string (e.g., out-of-range index → undefined)
+        path.replaceWith(t.identifier("undefined"));
       }
+    },
+  });
+}
+
+/**
+ * Remove alias declarations (`var aliasName = decoderName`) inside functions.
+ * After inlining, these aliases are dead code since all calls were resolved.
+ * Handles multi-declarators: only removes the alias declarator, keeps siblings.
+ */
+function removeAliasDeclarations(ast: File, pattern: StringArrayPattern): void {
+  const decoderAndWrapperNames = new Set([...pattern.decoderNames, ...pattern.wrapperNames]);
+
+  traverse(ast, {
+    VariableDeclarator(path) {
+      if (!t.isIdentifier(path.node.id) || !t.isIdentifier(path.node.init)) return;
+      const aliasName = path.node.id.name;
+      const targetName = path.node.init.name;
+
+      // Only remove aliases of known decoders/wrappers
+      if (!pattern.calleeNames.has(aliasName) || !decoderAndWrapperNames.has(targetName)) return;
+
+      // Must be inside a function (not top-level)
+      const parentFn = path.findParent(
+        p => t.isFunctionDeclaration(p.node) || t.isFunctionExpression(p.node),
+      );
+      if (!parentFn) return;
+
+      // Check if the alias is still referenced
+      const binding = path.scope.getBinding(aliasName);
+      if (binding && binding.referencePaths.length > 0) return;
+
+      path.remove();
     },
   });
 }

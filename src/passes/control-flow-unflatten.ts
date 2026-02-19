@@ -149,13 +149,12 @@ function resolveOrderArray(whilePath: NodePath, arrayVarName: string): string[] 
   const init = binding.path.node.init;
   if (!init) return null;
 
-  // Pattern 1: 'string'.split('|')
+  // Pattern 1: 'string'.split('|') or 'string'["split"]('|')
   if (
     t.isCallExpression(init) &&
     t.isMemberExpression(init.callee) &&
     t.isStringLiteral(init.callee.object) &&
-    t.isIdentifier(init.callee.property) &&
-    init.callee.property.name === "split" &&
+    isSplitProperty(init.callee) &&
     init.arguments.length === 1 &&
     t.isStringLiteral(init.arguments[0]) &&
     init.arguments[0].value === "|"
@@ -169,6 +168,13 @@ function resolveOrderArray(whilePath: NodePath, arrayVarName: string): string[] 
   }
 
   return null;
+}
+
+/** Check if a member expression property is "split" (either .split or ["split"]) */
+function isSplitProperty(node: t.MemberExpression): boolean {
+  if (!node.computed && t.isIdentifier(node.property) && node.property.name === "split") return true;
+  if (node.computed && t.isStringLiteral(node.property) && node.property.value === "split") return true;
+  return false;
 }
 
 /**
@@ -192,18 +198,17 @@ function buildCaseMap(
     const consequent = switchCase.consequent;
     if (consequent.length === 0) return null;
 
-    // Last statement must be a ContinueStatement targeting the while loop
     const lastStmt = consequent[consequent.length - 1];
-    if (!t.isContinueStatement(lastStmt)) return null;
-    // Ensure the continue is for the while loop (no label, or label matches)
-    if (lastStmt.label) return null;
 
-    // Collect all statements except the trailing continue
-    const bodyStmts = consequent.slice(0, -1);
-
-    // Strip trailing ContinueStatements that target the dispatch while loop
-    // but preserve continue statements inside inner loops
-    caseMap.set(label, bodyStmts);
+    if (t.isContinueStatement(lastStmt) && !lastStmt.label) {
+      // Normal dispatch case: strip the trailing continue
+      caseMap.set(label, consequent.slice(0, -1));
+    } else if (t.isReturnStatement(lastStmt) || t.isThrowStatement(lastStmt)) {
+      // Terminal case (return/throw): keep all statements including the terminator
+      caseMap.set(label, [...consequent]);
+    } else {
+      return null;
+    }
   }
 
   return caseMap;

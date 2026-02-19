@@ -36,7 +36,7 @@ export const constantPropagatePass: ASTPass = {
 
         // Propagate literal values
         if (isSimpleLiteral(init.node)) {
-          for (const ref of binding.referencePaths) {
+          for (const ref of [...binding.referencePaths]) {
             if (ref.isIdentifier()) {
               ref.replaceWith(t.cloneNode(init.node));
             }
@@ -49,10 +49,48 @@ export const constantPropagatePass: ASTPass = {
           const targetBinding = path.scope.getBinding(init.node.name);
           if (!targetBinding) return;
           if (targetBinding.constantViolations.length > 0) return;
-          for (const ref of binding.referencePaths) {
+          for (const ref of [...binding.referencePaths]) {
             if (ref.isIdentifier()) {
               ref.replaceWith(t.cloneNode(init.node));
             }
+          }
+          return;
+        }
+
+        // Propagate constant array element access: const arr = ["a", "b"]; arr[0] → "a"
+        if (t.isArrayExpression(init.node) && isAllLiterals(init.node)) {
+          // Verify no element mutations (arr[i] = value)
+          const hasMutation = binding.referencePaths.some(ref => {
+            const memberPath = ref.parentPath;
+            if (!memberPath?.isMemberExpression() || memberPath.node.object !== ref.node) return false;
+            const assignPath = memberPath.parentPath;
+            return assignPath?.isAssignmentExpression() && assignPath.node.left === memberPath.node;
+          });
+          if (hasMutation) return;
+
+          const elements = init.node.elements;
+          let allReplaced = true;
+          for (const ref of [...binding.referencePaths]) {
+            const memberPath = ref.parentPath;
+            if (!memberPath?.isMemberExpression() ||
+                memberPath.node.object !== ref.node ||
+                !memberPath.node.computed) {
+              allReplaced = false;
+              continue;
+            }
+            const prop = memberPath.node.property;
+            if (!t.isNumericLiteral(prop)) { allReplaced = false; continue; }
+            const idx = prop.value;
+            if (idx < 0 || idx >= elements.length || !Number.isInteger(idx)) {
+              allReplaced = false;
+              continue;
+            }
+            const el = elements[idx];
+            if (!el || t.isSpreadElement(el)) { allReplaced = false; continue; }
+            memberPath.replaceWith(t.cloneNode(el));
+          }
+          if (allReplaced) {
+            path.remove();
           }
         }
       },
@@ -69,4 +107,10 @@ function isSimpleLiteral(node: t.Node): boolean {
   if (t.isNullLiteral(node)) return true;
   if (t.isIdentifier(node) && node.name === "undefined") return true;
   return false;
+}
+
+function isAllLiterals(arr: t.ArrayExpression): boolean {
+  return arr.elements.length > 0 && arr.elements.every(
+    el => el !== null && !t.isSpreadElement(el) && isSimpleLiteral(el),
+  );
 }
