@@ -113,13 +113,15 @@ function detectPattern(ast: File): StringArrayPattern | null {
   }
   if (!decoderName || decoderIdx === -1) return null;
 
-  // Step 3: Find wrapper functions — body calls decoderName
+  // Step 3: Find wrapper functions — small forwarding functions that call decoder
+  // Wrappers have exactly 2 params, a short body (≤3 statements), and call the decoder.
+  // This distinguishes them from user functions that happen to use the decoder.
   const wrapperNames: string[] = [];
   const wrapperIndices: number[] = [];
   for (let i = 0; i < body.length; i++) {
     if (i === arrayIdx || i === decoderIdx) continue;
     const name = getFnName(body[i]);
-    if (name && bodyContainsName(body[i], decoderName)) {
+    if (name && isWrapperFunction(body[i], decoderName)) {
       wrapperNames.push(name);
       wrapperIndices.push(i);
     }
@@ -269,6 +271,38 @@ function removeSetupStatements(ast: File, pattern: StringArrayPattern): void {
 }
 
 // --- Helper functions ---
+
+/**
+ * Check if a statement is a wrapper function — a small forwarding function
+ * that calls the decoder with offset arithmetic. Wrappers have:
+ * - Exactly 2 parameters
+ * - A short body (≤3 statements: optional var decl + return decoder(...))
+ * - A call to decoderName in the body
+ * This prevents false positives on user functions that happen to call the decoder.
+ */
+function isWrapperFunction(stmt: t.Statement, decoderName: string): boolean {
+  let params: t.Node[] | undefined;
+  let fnBody: t.BlockStatement | undefined;
+
+  if (t.isFunctionDeclaration(stmt)) {
+    params = stmt.params;
+    fnBody = stmt.body;
+  } else if (t.isVariableDeclaration(stmt)) {
+    for (const d of stmt.declarations) {
+      if (t.isFunctionExpression(d.init) || t.isArrowFunctionExpression(d.init)) {
+        params = d.init.params;
+        if (t.isBlockStatement(d.init.body)) fnBody = d.init.body;
+      }
+    }
+  }
+
+  if (!params || !fnBody) return false;
+  if (params.length !== 2) return false;
+  if (fnBody.body.length > 3) return false;
+
+  // Body must contain a call to decoderName
+  return generateNode(fnBody as any).code.includes(decoderName);
+}
 
 function isSelfOverwritingArrayFn(stmt: t.FunctionDeclaration): boolean {
   if (!stmt.id) return false;
