@@ -3,11 +3,16 @@
 ## [Unreleased]
 
 ### Added
+- String array resolution pass: detects and resolves javascript-obfuscator's
+  string array obfuscation (array + rotation IIFE + decoder function)
+- Process-isolated sandbox execution for safe decoder function evaluation
+- Support for rotation with offset, base64 encoding, self-overwriting decoders,
+  and custom decoding logic
 - Control flow object inlining pass: detects and inlines javascript-obfuscator's
   control flow storage objects (binary/logical proxy functions, call delegation,
   string literals)
 - Support for transformObjectKeys pattern (empty object + sequential assignments)
-- 22 new tests for control flow object inlining (216 total)
+- 44 new tests for string array + control flow passes (238 total)
 
 ## [0.2.0] - 2026-02-19
 

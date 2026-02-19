@@ -13,6 +13,7 @@ import { hexDecodePass } from "./passes/hex-decode.js";
 import { astSimplifyPass } from "./passes/ast-simplify.js";
 import { astRenamePass } from "./passes/ast-rename.js";
 import { controlFlowObjectPass } from "./passes/control-flow-object.js";
+import { stringArrayPass } from "./passes/string-array.js";
 import { formatPass } from "./passes/format.js";
 
 const inputPath = process.argv[2] ?? resolve("input/lodash.min.js");
@@ -22,7 +23,7 @@ const source = readFileSync(inputPath, "utf-8");
 
 const result = runPipeline(
   source,
-  [constantFoldPass, constantPropagatePass, deadCodeEliminatePass, hexDecodePass, controlFlowObjectPass, astSimplifyPass, astRenamePass],
+  [constantFoldPass, constantPropagatePass, deadCodeEliminatePass, hexDecodePass, stringArrayPass, controlFlowObjectPass, astSimplifyPass, astRenamePass],
   [formatPass],
 );
 
