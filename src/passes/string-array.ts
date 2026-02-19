@@ -135,12 +135,14 @@ function detectPattern(ast: File): StringArrayPattern | null {
     }
   }
 
-  // Step 5: Build removal indices (core setup: array → last setup fn, including IIFEs)
-  const lastIdx = Math.max(arrayIdx, decoderIdx, ...wrapperIndices);
-  const removeIndices: number[] = [];
-  for (let i = Math.min(arrayIdx, decoderIdx); i <= lastIdx; i++) {
-    const stmt = body[i];
-    if (t.isVariableDeclaration(stmt) || t.isFunctionDeclaration(stmt) || isIIFE(stmt)) {
+  // Step 5: Build removal indices — explicit identification (not range-based,
+  // because javascript-obfuscator interleaves setup with user code)
+  const removeIndices: number[] = [arrayIdx, decoderIdx, ...wrapperIndices];
+
+  // Find rotation IIFEs — IIFEs whose arguments reference the array name
+  for (let i = 0; i < body.length; i++) {
+    if (removeIndices.includes(i)) continue;
+    if (isIIFE(body[i]) && generateNode(body[i] as any).code.includes(arrayName)) {
       removeIndices.push(i);
     }
   }

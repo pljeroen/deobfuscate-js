@@ -58,7 +58,7 @@ export function runPipeline(
   astPasses: ASTPass[],
   tokenPasses: TokenPass[],
 ): string {
-  const afterAST = runASTPipeline(source, astPasses);
+  const afterAST = runASTPipeline(source, astPasses, { maxIterations: 3 });
   return runTokenPipeline(afterAST, tokenPasses);
 }
 
