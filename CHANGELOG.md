@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- Control flow unflattening pass: reconstructs linear control flow from
+  while/switch dispatch pattern (javascript-obfuscator's controlFlowFlattening)
+- Bundler unpacking pass: detects and extracts modules from webpack 4/5
+  and browserify bundles
 - String array resolution pass: detects and resolves javascript-obfuscator's
   string array obfuscation (array + rotation IIFE + decoder function)
 - Process-isolated sandbox execution for safe decoder function evaluation
@@ -12,7 +16,7 @@
   control flow storage objects (binary/logical proxy functions, call delegation,
   string literals)
 - Support for transformObjectKeys pattern (empty object + sequential assignments)
-- 44 new tests for string array + control flow passes (238 total)
+- 63 new tests for structural deobfuscation passes (257 total)
 
 ## [0.2.0] - 2026-02-19
 
