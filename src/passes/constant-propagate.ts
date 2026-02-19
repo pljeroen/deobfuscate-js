@@ -22,9 +22,6 @@ export const constantPropagatePass: ASTPass = {
         const init = path.get("init");
         if (!init.node) return;
 
-        // Only propagate literal values (no side effects)
-        if (!isSimpleLiteral(init.node)) return;
-
         const id = path.get("id");
         if (!id.isIdentifier()) return;
 
@@ -37,10 +34,25 @@ export const constantPropagatePass: ASTPass = {
         // Must have references to inline into
         if (binding.referencePaths.length === 0) return;
 
-        // Clone the literal value into each reference site
-        for (const ref of binding.referencePaths) {
-          if (ref.isIdentifier()) {
-            ref.replaceWith(t.cloneNode(init.node));
+        // Propagate literal values
+        if (isSimpleLiteral(init.node)) {
+          for (const ref of binding.referencePaths) {
+            if (ref.isIdentifier()) {
+              ref.replaceWith(t.cloneNode(init.node));
+            }
+          }
+          return;
+        }
+
+        // Propagate identifier aliases (const alias = original) when original is also constant
+        if (t.isIdentifier(init.node)) {
+          const targetBinding = path.scope.getBinding(init.node.name);
+          if (!targetBinding) return;
+          if (targetBinding.constantViolations.length > 0) return;
+          for (const ref of binding.referencePaths) {
+            if (ref.isIdentifier()) {
+              ref.replaceWith(t.cloneNode(init.node));
+            }
           }
         }
       },

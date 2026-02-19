@@ -23,12 +23,13 @@ export function runASTPipeline(
   options?: ASTPipelineOptions,
 ): string {
   const maxIterations = options?.maxIterations ?? 1;
-  let ast = parse(source);
+  let currentSource = source;
+  let ast = parse(currentSource);
   let previousCode = "";
 
   for (let i = 0; i < maxIterations; i++) {
     for (const pass of passes) {
-      ast = pass.run(ast);
+      ast = pass.run(ast, currentSource);
     }
     const currentCode = generate(ast);
     if (currentCode === previousCode) {
@@ -36,7 +37,8 @@ export function runASTPipeline(
     }
     previousCode = currentCode;
     if (i < maxIterations - 1) {
-      ast = parse(currentCode);
+      currentSource = currentCode;
+      ast = parse(currentSource);
     }
   }
 

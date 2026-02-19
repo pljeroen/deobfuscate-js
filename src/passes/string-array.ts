@@ -28,8 +28,8 @@ export const stringArrayPass: ASTPass = {
   description: "Resolve string array obfuscation (decoder functions, rotation, encoding)",
   safety: "unsafe",
 
-  run(ast: File): File {
-    const pattern = detectPattern(ast);
+  run(ast: File, source?: string): File {
+    const pattern = detectPattern(ast, source);
     if (!pattern) return ast;
 
     try {
@@ -39,7 +39,7 @@ export const stringArrayPass: ASTPass = {
       inlineResolvedCalls(ast, pattern, resolved);
       removeSetupStatements(ast, pattern);
     } catch {
-      // Sandbox failure (timeout, runtime error) — return AST unchanged
+      // Sandbox execution failed (timeout, syntax error, etc.) — skip this pass
     }
 
     return ast;
@@ -48,7 +48,7 @@ export const stringArrayPass: ASTPass = {
 
 interface StringArrayPattern {
   arrayName: string;
-  decoderName: string;
+  decoderNames: string[];
   wrapperNames: string[];
   /** All function names whose calls should be inlined (decoder + wrappers) */
   calleeNames: Set<string>;
@@ -62,7 +62,18 @@ interface StringArrayPattern {
 
 // --- Detection ---
 
-function detectPattern(ast: File): StringArrayPattern | null {
+/** Extract original source text for a node, preserving exact formatting. */
+function sourceSlice(node: t.Node, source: string | undefined): string | null {
+  if (!source || node.start == null || node.end == null) return null;
+  return source.substring(node.start, node.end);
+}
+
+/** Generate code for a node, preferring original source to preserve formatting. */
+function nodeCode(node: t.Node, source: string | undefined): string {
+  return sourceSlice(node, source) ?? generateNode(node as any).code;
+}
+
+function detectPattern(ast: File, source?: string): StringArrayPattern | null {
   const body = ast.program.body;
 
   // Step 1: Find string array — var declaration or self-overwriting function
@@ -90,44 +101,44 @@ function detectPattern(ast: File): StringArrayPattern | null {
   }
   if (!arrayName || arrayIdx === -1) return null;
 
-  // Step 2: Find decoder — function whose body references arrayName
-  let decoderName: string | null = null;
-  let decoderIdx = -1;
+  // Step 2: Find decoders — functions whose body references arrayName
+  // (obfuscator.io can generate multiple decoders with different encodings)
+  const decoderNames: string[] = [];
+  const decoderIndices: number[] = [];
 
   for (let i = 0; i < body.length; i++) {
     if (i === arrayIdx) continue;
     const name = getFnName(body[i]);
     if (name && bodyContainsName(body[i], arrayName)) {
-      decoderName = name;
-      decoderIdx = i;
-      break;
+      decoderNames.push(name);
+      decoderIndices.push(i);
     }
   }
 
   // Fallback: most-called function with numeric first arg (backward compat)
-  if (!decoderName) {
+  if (decoderNames.length === 0) {
     const result = findDecoderByFrequency(ast, arrayIdx);
     if (!result) return null;
-    decoderName = result.name;
-    decoderIdx = result.idx;
+    decoderNames.push(result.name);
+    decoderIndices.push(result.idx);
   }
-  if (!decoderName || decoderIdx === -1) return null;
+  if (decoderNames.length === 0) return null;
 
-  // Step 3: Find wrapper functions — small forwarding functions that call decoder
-  // Wrappers have exactly 2 params, a short body (≤3 statements), and call the decoder.
+  // Step 3: Find wrapper functions — small forwarding functions that call a decoder
+  // Wrappers have exactly 2 params, a short body (≤3 statements), and call a decoder.
   // This distinguishes them from user functions that happen to use the decoder.
   const wrapperNames: string[] = [];
   const wrapperIndices: number[] = [];
   for (let i = 0; i < body.length; i++) {
-    if (i === arrayIdx || i === decoderIdx) continue;
+    if (i === arrayIdx || decoderIndices.includes(i)) continue;
     const name = getFnName(body[i]);
-    if (name && isWrapperFunction(body[i], decoderName)) {
+    if (name && decoderNames.some(dn => isWrapperFunction(body[i], dn))) {
       wrapperNames.push(name);
       wrapperIndices.push(i);
     }
   }
 
-  const calleeNames = new Set([decoderName, ...wrapperNames]);
+  const calleeNames = new Set([...decoderNames, ...wrapperNames]);
 
   // Step 4: Collect offset objects — var with object of only numeric values
   const offsetIndices: number[] = [];
@@ -137,32 +148,147 @@ function detectPattern(ast: File): StringArrayPattern | null {
     }
   }
 
-  // Step 5: Build removal indices — explicit identification (not range-based,
-  // because javascript-obfuscator interleaves setup with user code)
-  const removeIndices: number[] = [arrayIdx, decoderIdx, ...wrapperIndices];
+  // Step 5: Build removal indices (before scoped wrapper detection, so we can skip setup-internal)
+  const removeIndices: number[] = [arrayIdx, ...decoderIndices, ...wrapperIndices];
 
   // Find rotation IIFEs — IIFEs whose arguments reference the array name
   for (let i = 0; i < body.length; i++) {
     if (removeIndices.includes(i)) continue;
-    if (isIIFE(body[i]) && generateNode(body[i] as any).code.includes(arrayName)) {
+    if (isIIFE(body[i]) && new RegExp(`\\b${arrayName}\\b`).test(nodeCode(body[i], source))) {
       removeIndices.push(i);
     }
   }
 
-  // Step 6: Build setup code (core + offset objects for sandbox evaluation)
+  const setupStmtNodes = new Set(removeIndices.map(i => body[i]).filter(Boolean));
+
+  // Step 3b: Find function-scoped wrappers — nested wrappers that call known callees
+  // Iterate until convergence to handle wrapper chains (A calls B calls decoder).
+  const scopedWrapperDefs: string[] = [];
+  const scopedContextDefs: string[] = [];
+  const extractedContextNames = new Set<string>();
+
+  let prevCalleeSize: number;
+  do {
+    prevCalleeSize = calleeNames.size;
+    traverse(ast, {
+      FunctionDeclaration(path) {
+        const node = path.node;
+        if (!t.isIdentifier(node.id)) return;
+        const name = node.id.name;
+        if (calleeNames.has(name) || name === arrayName) return;
+
+        // Must be nested (inside another function)
+        const parentFn = path.findParent(
+          p => t.isFunctionDeclaration(p.node) || t.isFunctionExpression(p.node),
+        );
+        if (!parentFn) return;
+
+        // Skip wrappers inside setup statements (rotation IIFEs, decoder bodies)
+        const topStmt = path.findParent(p => p.parentPath?.node === ast.program);
+        if (topStmt && setupStmtNodes.has(topStmt.node as t.Statement)) return;
+
+        // Must match wrapper pattern: ≥2 params, short body
+        if (node.params.length < 2) return;
+        if (node.body.body.length > 3) return;
+
+        // Body must call a known callee (decoder, top-level wrapper, or already-detected scoped wrapper)
+        const bodyCode = generateNode(node.body as any).code;
+        const paramNames = new Set(
+          node.params.filter(p => t.isIdentifier(p)).map(p => (p as t.Identifier).name),
+        );
+        const callsKnown = [...calleeNames].some(
+          cn => !paramNames.has(cn) && new RegExp(`\\b${cn}\\b`).test(bodyCode),
+        );
+        if (!callsKnown) return;
+
+        // Found a scoped wrapper
+        calleeNames.add(name);
+        scopedWrapperDefs.push(generateNode(node as any).code);
+
+        // Extract referenced variables from enclosing scope (offset objects)
+        const parentFnNode = parentFn.node as t.FunctionDeclaration | t.FunctionExpression;
+        for (const stmt of parentFnNode.body.body) {
+          if (!t.isVariableDeclaration(stmt)) continue;
+          for (const d of stmt.declarations) {
+            if (!t.isIdentifier(d.id)) continue;
+            if (extractedContextNames.has(d.id.name)) continue;
+            if (new RegExp(`\\b${d.id.name}\\b`).test(bodyCode)) {
+              extractedContextNames.add(d.id.name);
+              scopedContextDefs.push(generateNode(stmt as any).code);
+            }
+          }
+        }
+      },
+    });
+  } while (calleeNames.size > prevCalleeSize);
+
+  // Step 3c: Find variable aliases — `var x = decoder` creates a local alias for calls
+  // (obfuscator.io "calls transform" aliases decoders inside user functions)
+  // Skip aliases inside setup statements.
+  const aliasDefs: string[] = [];
+
+  traverse(ast, {
+    VariableDeclarator(path) {
+      if (!t.isIdentifier(path.node.id) || !t.isIdentifier(path.node.init)) return;
+      const aliasName = path.node.id.name;
+      const targetName = path.node.init.name;
+      if (calleeNames.has(aliasName) || !calleeNames.has(targetName)) return;
+
+      // Must be inside a function (top-level aliases are handled by the main flow)
+      const parentFn = path.findParent(
+        p => t.isFunctionDeclaration(p.node) || t.isFunctionExpression(p.node),
+      );
+      if (!parentFn) return;
+
+      // Skip aliases inside setup statements
+      const topStmt = path.findParent(p => p.parentPath?.node === ast.program);
+      if (topStmt && setupStmtNodes.has(topStmt.node as t.Statement)) return;
+
+      calleeNames.add(aliasName);
+      aliasDefs.push(`var ${aliasName} = ${targetName};`);
+    },
+  });
+
+  // Step 6: Build setup code (core + offset objects + scoped wrapper defs for sandbox)
+  // Uses original source text when available to preserve exact formatting (critical for
+  // self-defending code that checks Function.prototype.toString() output).
   const codeIndices = [...new Set([...removeIndices, ...offsetIndices])].sort((a, b) => a - b);
-  const setupCode = codeIndices.map(i => generateNode(body[i] as any).code).join("\n");
+  let setupCode = codeIndices.map(i => {
+    const stmt = body[i];
+    // For SequenceExpressions (rotation IIFE + anti-tamper IIFE combined),
+    // extract only the IIFEs that reference the array to avoid executing anti-tamper code.
+    if (t.isExpressionStatement(stmt) && t.isSequenceExpression(stmt.expression)) {
+      const relevant = stmt.expression.expressions.filter(expr => {
+        if (!isIIFECall(expr)) return false;
+        return new RegExp(`\\b${arrayName}\\b`).test(nodeCode(expr, source));
+      });
+      if (relevant.length > 0) {
+        return relevant.map(e => "(" + nodeCode(e, source) + ");").join("\n");
+      }
+    }
+    return nodeCode(stmt, source);
+  }).join("\n");
+  if (scopedContextDefs.length > 0) setupCode += "\n" + scopedContextDefs.join("\n");
+  if (scopedWrapperDefs.length > 0) setupCode += "\n" + scopedWrapperDefs.join("\n");
+  if (aliasDefs.length > 0) setupCode += "\n" + aliasDefs.join("\n");
 
   // Step 7: Collect unique calls to decoder and wrappers (excluding internal calls)
-  const setupFnNames = new Set([arrayName, decoderName, ...wrapperNames]);
+  const setupFnNames = new Set([arrayName, ...calleeNames]);
   const uniqueCalls = new Map<string, string>();
+
+  // Pre-compute set of nodes for setup statements (for fast exclusion)
+  const setupNodes = new Set(removeIndices.map(i => body[i]).filter(Boolean));
 
   traverse(ast, {
     CallExpression(path) {
       const callee = path.node.callee;
       if (!t.isIdentifier(callee) || !calleeNames.has(callee.name)) return;
 
-      // Skip calls inside setup functions (e.g., wrapper calling decoder internally)
+      // Skip calls inside setup statements (rotation IIFEs, decoder/wrapper bodies)
+      const topStmt = path.findParent(p => p.parentPath?.node === ast.program);
+      if (topStmt && setupNodes.has(topStmt.node as t.Statement)) return;
+
+      // Skip calls inside named setup functions (scoped wrappers calling decoder)
       const parentFn = path.findParent(
         p => t.isFunctionDeclaration(p.node) || t.isFunctionExpression(p.node),
       );
@@ -188,7 +314,7 @@ function detectPattern(ast: File): StringArrayPattern | null {
 
   return {
     arrayName,
-    decoderName,
+    decoderNames,
     wrapperNames,
     calleeNames,
     removeIndices,
@@ -216,7 +342,10 @@ ${resultAssignments}
 process.stdout.write(JSON.stringify(__results));
 `;
 
-  const output = executeSandboxed(script, 5000);
+  // Scale timeout with setup complexity + number of calls (RC4 decoding can be slow)
+  const setupKB = Math.ceil(pattern.setupCode.length / 1024);
+  const timeout = Math.max(5000, Math.min(60000, setupKB * 1000 + calls.length * 50));
+  const output = executeSandboxed(script, timeout);
   const results: Record<string, unknown> = JSON.parse(output);
 
   const resolved = new Map<string, string>();
@@ -275,7 +404,7 @@ function removeSetupStatements(ast: File, pattern: StringArrayPattern): void {
 /**
  * Check if a statement is a wrapper function — a small forwarding function
  * that calls the decoder with offset arithmetic. Wrappers have:
- * - Exactly 2 parameters
+ * - At least 2 parameters (obfuscator.io may add decoy params)
  * - A short body (≤3 statements: optional var decl + return decoder(...))
  * - A call to decoderName in the body
  * This prevents false positives on user functions that happen to call the decoder.
@@ -297,11 +426,13 @@ function isWrapperFunction(stmt: t.Statement, decoderName: string): boolean {
   }
 
   if (!params || !fnBody) return false;
-  if (params.length !== 2) return false;
+  if (params.length < 2) return false;
   if (fnBody.body.length > 3) return false;
 
   // Body must contain a call to decoderName
-  return generateNode(fnBody as any).code.includes(decoderName);
+  const code = generateNode(fnBody as any).code;
+  const re = new RegExp(`\\b${decoderName}\\b`);
+  return re.test(code);
 }
 
 function isSelfOverwritingArrayFn(stmt: t.FunctionDeclaration): boolean {
@@ -356,7 +487,9 @@ function bodyContainsName(stmt: t.Statement, name: string): boolean {
     }
   }
   if (!body) return false;
-  return generateNode(body as any).code.includes(name);
+  const code = generateNode(body as any).code;
+  const re = new RegExp(`\\b${name}\\b`);
+  return re.test(code);
 }
 
 function isOffsetObjectDecl(stmt: t.Statement): boolean {
@@ -374,14 +507,28 @@ function isOffsetObjectDecl(stmt: t.Statement): boolean {
   return false;
 }
 
-function isIIFE(stmt: t.Statement): boolean {
-  if (!t.isExpressionStatement(stmt)) return false;
-  const expr = stmt.expression;
+function isIIFECall(expr: t.Expression): boolean {
   if (!t.isCallExpression(expr)) return false;
   const callee = expr.callee;
   return t.isFunctionExpression(callee) ||
     (t.isParenthesizedExpression(callee) &&
      t.isFunctionExpression((callee as t.ParenthesizedExpression).expression));
+}
+
+function isIIFE(stmt: t.Statement): boolean {
+  if (!t.isExpressionStatement(stmt)) return false;
+  const expr = stmt.expression;
+  // Direct IIFE: (function(...){...})(...)
+  if (isIIFECall(expr)) return true;
+  // Sequence IIFE: (function(...){...})(...), (function(...){...})(...)
+  if (t.isSequenceExpression(expr)) {
+    return expr.expressions.some(e => isIIFECall(e));
+  }
+  // Unary IIFE: !function(...){...}(...)
+  if (t.isUnaryExpression(expr) && t.isCallExpression(expr.argument)) {
+    return t.isFunctionExpression(expr.argument.callee);
+  }
+  return false;
 }
 
 function isAllStringLiterals(arr: t.ArrayExpression): boolean {

@@ -129,6 +129,21 @@ export const deadCodeEliminatePass: ASTPass = {
       },
     });
 
+    // Pass 4: Remove unreferenced nested function declarations (scoped wrappers etc.)
+    // Only removes functions inside other functions — top-level may be exports.
+    traverse(ast, {
+      FunctionDeclaration(path) {
+        if (!path.node.id || !t.isIdentifier(path.node.id)) return;
+        // Only remove if nested inside another function
+        if (!path.parentPath?.getFunctionParent()) return;
+        const binding = path.scope.getBinding(path.node.id.name);
+        if (!binding) return;
+        if (binding.referencePaths.length > 0) return;
+        if (binding.constantViolations.length > 0) return;
+        path.remove();
+      },
+    });
+
     return ast;
   },
 };
@@ -136,6 +151,7 @@ export const deadCodeEliminatePass: ASTPass = {
 function isPure(node: t.Node): boolean {
   if (t.isLiteral(node)) return true;
   if (t.isIdentifier(node)) return true;
+  if (t.isFunctionExpression(node) || t.isArrowFunctionExpression(node)) return true;
   if (t.isUnaryExpression(node) && isPure(node.argument)) return true;
   if (t.isBinaryExpression(node) && isPure(node.left) && isPure(node.right)) return true;
   if (t.isArrayExpression(node)) {

@@ -41,7 +41,7 @@ export interface ASTPass {
   name: string;
   description: string;
   safety?: "safe" | "unsafe";
-  run(ast: File): File;
+  run(ast: File, source?: string): File;
 }
 
 // Token-based pass interface (operates on source string)

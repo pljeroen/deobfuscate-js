@@ -35,6 +35,7 @@ export const controlFlowObjectPass: ASTPass = {
         VariableDeclaration(path) {
           if (inlineControlFlowObject(path)) {
             changed = true;
+            path.stop();
           }
         },
       });
@@ -52,7 +53,7 @@ function inlineControlFlowObject(path: NodePath<t.VariableDeclaration>): boolean
   const objName = decl.id.name;
 
   path.scope.crawl();
-  const binding = path.scope.getBinding(objName);
+  let binding = path.scope.getBinding(objName);
   if (!binding) return false;
 
   // Safety: no reassignment of the variable itself
@@ -64,7 +65,7 @@ function inlineControlFlowObject(path: NodePath<t.VariableDeclaration>): boolean
   // Safety: no property writes (obj.key = ...)
   if (hasPropertyWrites(binding)) return false;
 
-  // Analyze all properties — returns null if any property doesn't match a known proxy/string pattern
+  // Analyze recognizable properties (skips unknown patterns for partial inlining)
   const propMap = analyzeProperties(decl.init);
   if (!propMap || propMap.size === 0) return false;
 
@@ -72,8 +73,9 @@ function inlineControlFlowObject(path: NodePath<t.VariableDeclaration>): boolean
 
   // Phase 1: Inline string literal references (not in callee position)
   for (const ref of [...binding.referencePaths]) {
+    if (ref.removed || !ref.parentPath) continue;
     const memberPath = ref.parentPath;
-    if (!memberPath || !t.isMemberExpression(memberPath.node)) continue;
+    if (!t.isMemberExpression(memberPath.node)) continue;
 
     const propName = getMemberPropertyName(memberPath.node);
     if (!propName) continue;
@@ -87,42 +89,66 @@ function inlineControlFlowObject(path: NodePath<t.VariableDeclaration>): boolean
     inlinedAny = true;
   }
 
-  // Phase 2: Inline function proxy calls
-  for (const ref of [...binding.referencePaths]) {
-    const memberPath = ref.parentPath;
-    if (!memberPath || !t.isMemberExpression(memberPath.node)) continue;
+  // Re-crawl scope after Phase 1 replacements to get fresh reference paths
+  if (inlinedAny) {
+    path.scope.crawl();
+    const freshBinding = path.scope.getBinding(objName);
+    if (!freshBinding) return inlinedAny;
+    binding = freshBinding;
+  }
 
-    const propName = getMemberPropertyName(memberPath.node);
-    if (!propName) continue;
-    const info = propMap.get(propName);
-    if (!info || info.type === "string") continue;
+  // Phase 2: Inline function proxy calls (one at a time to avoid stale paths)
+  let phase2changed = true;
+  while (phase2changed) {
+    phase2changed = false;
+    path.scope.crawl();
+    binding = path.scope.getBinding(objName);
+    if (!binding) break;
 
-    const callPath = memberPath.parentPath;
-    if (!callPath || !t.isCallExpression(callPath.node)) continue;
-    if (callPath.node.callee !== memberPath.node) continue;
+    for (const ref of binding.referencePaths) {
+      if (ref.removed || !ref.parentPath) continue;
+      const memberPath = ref.parentPath;
+      if (!t.isMemberExpression(memberPath.node)) continue;
 
-    const args = callPath.node.arguments as t.Expression[];
+      const propName = getMemberPropertyName(memberPath.node);
+      if (!propName) continue;
+      const info = propMap.get(propName);
+      if (!info || info.type === "string") continue;
 
-    if (info.type === "binary") {
-      callPath.replaceWith(
-        t.binaryExpression(info.operator, t.cloneNode(args[info.leftIdx]), t.cloneNode(args[info.rightIdx]))
-      );
-      inlinedAny = true;
-    } else if (info.type === "logical") {
-      callPath.replaceWith(
-        t.logicalExpression(info.operator, t.cloneNode(args[info.leftIdx]), t.cloneNode(args[info.rightIdx]))
-      );
-      inlinedAny = true;
-    } else if (info.type === "call") {
-      const callee = t.cloneNode(args[info.calleeIdx]);
-      let passedArgs: t.Expression[];
-      if (info.hasRest) {
-        passedArgs = args.slice(info.calleeIdx + 1).map(a => t.cloneNode(a));
-      } else {
-        passedArgs = info.argIndices.map(i => t.cloneNode(args[i]));
+      const callPath = memberPath.parentPath;
+      if (!callPath || !t.isCallExpression(callPath.node)) continue;
+      if (callPath.node.callee !== memberPath.node) continue;
+
+      const args = callPath.node.arguments as t.Expression[];
+      let replaced = false;
+
+      if (info.type === "binary") {
+        callPath.replaceWith(
+          t.binaryExpression(info.operator, t.cloneNode(args[info.leftIdx]), t.cloneNode(args[info.rightIdx]))
+        );
+        replaced = true;
+      } else if (info.type === "logical") {
+        callPath.replaceWith(
+          t.logicalExpression(info.operator, t.cloneNode(args[info.leftIdx]), t.cloneNode(args[info.rightIdx]))
+        );
+        replaced = true;
+      } else if (info.type === "call") {
+        const callee = t.cloneNode(args[info.calleeIdx]);
+        let passedArgs: t.Expression[];
+        if (info.hasRest) {
+          passedArgs = args.slice(info.calleeIdx + 1).map(a => t.cloneNode(a));
+        } else {
+          passedArgs = info.argIndices.map(i => t.cloneNode(args[i]));
+        }
+        callPath.replaceWith(t.callExpression(callee, passedArgs));
+        replaced = true;
       }
-      callPath.replaceWith(t.callExpression(callee, passedArgs));
-      inlinedAny = true;
+
+      if (replaced) {
+        inlinedAny = true;
+        phase2changed = true;
+        break; // re-crawl scope before processing next reference
+      }
     }
   }
 
@@ -201,23 +227,39 @@ function analyzeProperties(obj: t.ObjectExpression): Map<string, PropertyInfo> |
       continue;
     }
 
-    if (t.isFunctionExpression(value)) {
-      const info = analyzeFunctionProxy(value);
-      if (!info) return null;
-      map.set(key, info);
+    // Handle string concatenation: "abc" + "def" → "abcdef"
+    const folded = tryFoldStringConcat(value);
+    if (folded !== null) {
+      map.set(key, { type: "string", value: folded });
       continue;
     }
 
-    return null;
+    if (t.isFunctionExpression(value)) {
+      const info = analyzeFunctionProxy(value);
+      if (info) {
+        map.set(key, info);
+        continue;
+      }
+    }
+
+    // Skip unrecognized properties instead of bailing — partial inlining is still useful
   }
 
-  return map;
+  return map.size > 0 ? map : null;
 }
 
 function analyzeFunctionProxy(fn: t.FunctionExpression): PropertyInfo | null {
-  if (fn.body.body.length !== 1) return null;
+  // Allow leading function/variable declarations (dead scoped wrappers) before the return
+  const stmts = fn.body.body;
+  if (stmts.length === 0) return null;
+  const lastStmt = stmts[stmts.length - 1];
+  if (!t.isReturnStatement(lastStmt) || !lastStmt.argument) return null;
+  // Verify all preceding statements are just declarations (not effectful)
+  for (let i = 0; i < stmts.length - 1; i++) {
+    if (!t.isFunctionDeclaration(stmts[i]) && !t.isVariableDeclaration(stmts[i])) return null;
+  }
 
-  const stmt = fn.body.body[0];
+  const stmt = lastStmt;
   if (!t.isReturnStatement(stmt) || !stmt.argument) return null;
 
   const ret = stmt.argument;
@@ -274,6 +316,17 @@ function analyzeFunctionProxy(fn: t.FunctionExpression): PropertyInfo | null {
     return { type: "call", calleeIdx, argIndices, hasRest: false };
   }
 
+  return null;
+}
+
+/** Recursively fold string concatenation: "abc" + "def" → "abcdef". Returns null if not all-string. */
+function tryFoldStringConcat(node: t.Node): string | null {
+  if (t.isStringLiteral(node)) return node.value;
+  if (t.isBinaryExpression(node) && node.operator === "+") {
+    const left = tryFoldStringConcat(node.left);
+    const right = tryFoldStringConcat(node.right);
+    if (left !== null && right !== null) return left + right;
+  }
   return null;
 }
 
