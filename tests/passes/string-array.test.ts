@@ -230,4 +230,137 @@ describe("string array resolution", () => {
       expect(result).not.toContain("_0xdec");
     });
   });
+
+  describe("R20: self-overwriting string array function", () => {
+    it("detects self-overwriting function as string array source", () => {
+      const result = deobfuscate(`
+        function _0x5246() {
+          var _0x4dec = ['log', 'Hello', 'world', 'foo', 'bar'];
+          _0x5246 = function() { return _0x4dec; };
+          return _0x5246();
+        }
+        function _0xdec(idx) { return _0x5246()[idx]; }
+        console[_0xdec(0)](_0xdec(1));
+      `);
+      expect(result).toContain('"log"');
+      expect(result).toContain('"Hello"');
+      expect(result).not.toContain("_0x5246");
+      expect(result).not.toContain("_0xdec");
+    });
+
+    it("detects self-overwriting function with rotation IIFE", () => {
+      const result = deobfuscate(`
+        function _0x5246() {
+          var _0x4dec = ['world', 'foo', 'bar', 'log', 'Hello'];
+          _0x5246 = function() { return _0x4dec; };
+          return _0x5246();
+        }
+        (function(fn, n) { var arr = fn(); while(n--) { arr.push(arr.shift()); } })(_0x5246, 3);
+        function _0xdec(idx) { return _0x5246()[idx]; }
+        console[_0xdec(0)](_0xdec(1));
+      `);
+      expect(result).toContain('"log"');
+      expect(result).toContain('"Hello"');
+      expect(result).not.toContain("_0x5246");
+    });
+  });
+
+  describe("R21: wrapper decoder functions with offset objects", () => {
+    it("resolves single wrapper function with offset arithmetic", () => {
+      const result = deobfuscate(`
+        var _0x4e2c = ['log', 'Hello', 'world', 'foo', 'bar'];
+        function _0xdec(idx) { return _0x4e2c[idx]; }
+        function _0xwrap(a, b) { return _0xdec(b - -0x64); }
+        console[_0xwrap(0, -0x64)](_0xwrap(0, -0x63));
+      `);
+      expect(result).toContain('"log"');
+      expect(result).toContain('"Hello"');
+      expect(result).not.toContain("_0xwrap");
+    });
+
+    it("resolves multiple wrappers pointing to same decoder", () => {
+      const result = deobfuscate(`
+        var _0x4e2c = ['log', 'Hello', 'world', 'foo', 'bar'];
+        function _0xdec(idx) { return _0x4e2c[idx]; }
+        function _0xwrapA(a, b) { return _0xdec(b - -0x64); }
+        function _0xwrapB(a, b) { return _0xdec(a - 0x100); }
+        console[_0xwrapA(0, -0x64)](_0xwrapB(0x101, 0));
+      `);
+      // _0xwrapA(0, -0x64) => _0xdec(-0x64 - -0x64) => _0xdec(0) => 'log'
+      // _0xwrapB(0x101, 0) => _0xdec(0x101 - 0x100) => _0xdec(1) => 'Hello'
+      expect(result).toContain('"log"');
+      expect(result).toContain('"Hello"');
+      expect(result).not.toContain("_0xwrapA");
+      expect(result).not.toContain("_0xwrapB");
+    });
+
+    it("resolves wrapper calls with offset object arguments", () => {
+      const result = deobfuscate(`
+        var _0x4e2c = ['log', 'Hello', 'world', 'foo', 'bar'];
+        function _0xdec(idx) { return _0x4e2c[idx]; }
+        function _0xwrap(a, b) { return _0xdec(b - -0x64); }
+        var _0xobj = { _0xaa: 0x64, _0xbb: 0x63 };
+        console[_0xwrap(0, -_0xobj._0xaa)](_0xwrap(0, -_0xobj._0xbb));
+      `);
+      // _0xwrap(0, -0x64) => _0xdec(-0x64 - -0x64) => _0xdec(0) => 'log'
+      // _0xwrap(0, -0x63) => _0xdec(-0x63 - -0x64) => _0xdec(1) => 'Hello'
+      expect(result).toContain('"log"');
+      expect(result).toContain('"Hello"');
+    });
+
+    it("resolves wrappers with local offset object in wrapper body", () => {
+      const result = deobfuscate(`
+        var _0x4e2c = ['log', 'Hello', 'world', 'foo', 'bar'];
+        function _0xdec(idx) { return _0x4e2c[idx]; }
+        function _0xwrap(a, b) {
+          var _0xlocal = { _0xoff: 0xce };
+          return _0xdec(a - -_0xlocal._0xoff);
+        }
+        _0xwrap(-0xce, 0);
+        _0xwrap(-0xcd, 0);
+      `);
+      // _0xwrap(-0xce, 0) => _0xdec(-0xce - -0xce) => _0xdec(0) => 'log'
+      // _0xwrap(-0xcd, 0) => _0xdec(-0xcd - -0xce) => _0xdec(1) => 'Hello'
+      expect(result).toContain('"log"');
+      expect(result).toContain('"Hello"');
+    });
+
+    it("handles self-overwriting array + wrappers + offset objects end-to-end", () => {
+      const result = deobfuscate(`
+        function _0x5246() {
+          var _0x4dec = ['log', 'Hello', 'world', 'foo', 'bar'];
+          _0x5246 = function() { return _0x4dec; };
+          return _0x5246();
+        }
+        function _0xdec(idx, key) {
+          idx = idx - 0x50;
+          var arr = _0x5246();
+          return arr[idx];
+        }
+        function _0xwrapA(a, b) { return _0xdec(b - -0x100, a); }
+        function _0xwrapB(a, b) { return _0xdec(a - 0x200, b); }
+        var _0xobj = { _0xp1: 0xb0, _0xp2: 0xaf };
+        console[_0xwrapA(0, -_0xobj._0xp1)](_0xwrapA(0, -_0xobj._0xaf));
+        var msg = _0xwrapB(0x252, 0);
+      `);
+      // _0xwrapA(0, -0xb0) => _0xdec(-0xb0 - -0x100, 0) => _0xdec(0x50, 0) => arr[0x50 - 0x50] = arr[0] => 'log'
+      // _0xwrapB(0x252, 0) => _0xdec(0x252 - 0x200, 0) => _0xdec(0x52, 0) => arr[0x52 - 0x50] = arr[2] => 'world'
+      expect(result).toContain('"log"');
+      expect(result).toContain('"world"');
+      expect(result).not.toContain("_0x5246");
+      expect(result).not.toContain("_0xdec");
+    });
+
+    it("removes wrapper functions and setup after resolution", () => {
+      const result = deobfuscate(`
+        var _0x4e2c = ['log', 'Hello', 'world', 'foo', 'bar'];
+        function _0xdec(idx) { return _0x4e2c[idx]; }
+        function _0xwrap(a, b) { return _0xdec(b - -0x64); }
+        console[_0xwrap(0, -0x64)](_0xwrap(0, -0x63));
+      `);
+      expect(result).not.toContain("_0x4e2c");
+      expect(result).not.toContain("_0xdec");
+      expect(result).not.toContain("_0xwrap");
+    });
+  });
 });
