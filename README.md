@@ -230,7 +230,7 @@ Output passes `node --check` -- syntactically valid JavaScript.
 
 ### Obfuscated JavaScript (vs webcrack)
 
-Tested against [webcrack](https://github.com/nicolo-ribaudo/webcrack) (leading open-source JS deobfuscator) on 9 samples with varying javascript-obfuscator settings:
+Tested against [webcrack](https://github.com/j4k0xb/webcrack) on 9 samples with varying javascript-obfuscator settings:
 
 | Result | Count | Notes |
 |---|---|---|
