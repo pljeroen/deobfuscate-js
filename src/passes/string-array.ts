@@ -68,9 +68,12 @@ function escapeRegExp(s: string): string {
 
 // --- Detection ---
 
-/** Extract original source text for a node, preserving exact formatting. */
+/** Extract original source text for a node, preserving exact formatting.
+ *  Validates that start/end are within source bounds (guards against stale positions
+ *  after earlier passes mutate the AST). Returns null on invalid ranges. */
 function sourceSlice(node: t.Node, source: string | undefined): string | null {
   if (!source || node.start == null || node.end == null) return null;
+  if (node.start < 0 || node.end > source.length || node.start >= node.end) return null;
   return source.substring(node.start, node.end);
 }
 

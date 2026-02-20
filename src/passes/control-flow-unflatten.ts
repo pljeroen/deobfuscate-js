@@ -32,7 +32,7 @@ export const controlFlowUnflattenPass: ASTPass = {
   run(ast: File): File {
     let changed = true;
     let iterations = 0;
-    const MAX_ITERATIONS = 50;
+    const MAX_ITERATIONS = 25;
     while (changed && iterations < MAX_ITERATIONS) {
       changed = false;
       iterations++;

@@ -170,7 +170,10 @@ function hasBlockScopedDecl(block: t.BlockStatement): boolean {
 
 function isPure(node: t.Node, allowIIFE = false): boolean {
   if (t.isLiteral(node)) return true;
-  if (t.isIdentifier(node)) return true;
+  // Only known-safe identifiers are pure — unknown identifiers can throw ReferenceError
+  if (t.isIdentifier(node)) {
+    return node.name === "undefined" || node.name === "NaN" || node.name === "Infinity";
+  }
   if (t.isFunctionExpression(node) || t.isArrowFunctionExpression(node)) return true;
   if (t.isUnaryExpression(node) && isPure(node.argument, allowIIFE)) return true;
   if (t.isBinaryExpression(node) && isPure(node.left, allowIIFE) && isPure(node.right, allowIIFE)) return true;

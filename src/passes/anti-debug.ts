@@ -73,7 +73,7 @@ export const antiDebugPass: ASTPass = {
     // Also handles SequenceExpressions (comma operator) by filtering individual sub-expressions.
     let changed = true;
     let phase3iters = 0;
-    while (changed && phase3iters < 50) {
+    while (changed && phase3iters < 10) {
       changed = false;
       phase3iters++;
       traverse(ast, {
@@ -109,7 +109,7 @@ export const antiDebugPass: ASTPass = {
     // Only removes obfuscation-pattern names to avoid accidentally deleting business logic.
     changed = true;
     let phase4iters = 0;
-    while (changed && phase4iters < 50) {
+    while (changed && phase4iters < 10) {
       changed = false;
       phase4iters++;
       traverse(ast, {
@@ -196,22 +196,35 @@ function containsString(fn: t.FunctionExpression | t.ArrowFunctionExpression, ta
   return found;
 }
 
-/** Check if a function body is a console-override (contains ["log","warn","info","error",...]) */
+/**
+ * Check if a function body is a console-override pattern.
+ * Requires BOTH: an array with ["log","warn","info","error",...] AND a console property
+ * assignment (console[x] = ...). This prevents false positives on legit code that
+ * happens to have an array of method names.
+ */
 function isConsoleOverride(fn: t.FunctionExpression | t.ArrowFunctionExpression): boolean {
-  let found = false;
   const body = t.isBlockStatement(fn.body) ? fn.body : null;
   if (!body) return false;
 
+  let hasMethodArray = false;
+  let hasConsoleAssign = false;
+
   function walk(node: t.Node): void {
-    if (found) return;
+    if (hasMethodArray && hasConsoleAssign) return;
     if (t.isArrayExpression(node)) {
       const strs = node.elements
         .filter((el): el is t.StringLiteral => t.isStringLiteral(el))
         .map((el) => el.value);
       if (strs.includes("log") && strs.includes("warn") && strs.includes("info") && strs.includes("error")) {
-        found = true;
-        return;
+        hasMethodArray = true;
       }
+    }
+    // Detect console[x] = ... (assignment to console property)
+    if (t.isAssignmentExpression(node) &&
+        t.isMemberExpression(node.left) &&
+        t.isIdentifier(node.left.object) &&
+        node.left.object.name === "console") {
+      hasConsoleAssign = true;
     }
     for (const key of t.VISITOR_KEYS[node.type] || []) {
       const child = (node as any)[key];
@@ -226,7 +239,7 @@ function isConsoleOverride(fn: t.FunctionExpression | t.ArrowFunctionExpression)
   }
 
   walk(body);
-  return found;
+  return hasMethodArray && hasConsoleAssign;
 }
 
 /** Check if a function body references any identifier from the given set.

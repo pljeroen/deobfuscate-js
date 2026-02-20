@@ -17,7 +17,7 @@ export const constantFoldPass: ASTPass = {
   run(ast: File): File {
     let changed = true;
     let iterations = 0;
-    const MAX_ITERATIONS = 100;
+    const MAX_ITERATIONS = 25;
 
     // Iterate until no more changes (folding can expose new foldable expressions)
     while (changed && iterations < MAX_ITERATIONS) {

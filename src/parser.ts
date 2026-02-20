@@ -48,6 +48,58 @@ export function parse(source: string): File {
   }
 }
 
+export interface ParseResult {
+  ast: File;
+  warnings: string[];
+}
+
+/**
+ * Parse with diagnostics — returns warnings when fallback/truncation occurs.
+ * Use this when you need to know if the parse was clean or degraded.
+ */
+export function parseWithDiagnostics(source: string): ParseResult {
+  const warnings: string[] = [];
+
+  try {
+    const ast = babelParse(source, PARSE_OPTIONS);
+    // Check for Babel error-recovery diagnostics
+    if ((ast as any).errors?.length > 0) {
+      for (const err of (ast as any).errors) {
+        warnings.push(`Parse error (recovered): ${err.message ?? err}`);
+      }
+    }
+    return { ast, warnings };
+  } catch (e: unknown) {
+    // Fallback: try sourceType "script"
+    try {
+      const ast = babelParse(source, { ...PARSE_OPTIONS, sourceType: "script" });
+      warnings.push("Fell back to sourceType 'script' after module parse failure");
+      return { ast, warnings };
+    } catch {
+      // noop — fall through to truncation
+    }
+
+    // Truncation fallback
+    if (e instanceof SyntaxError && typeof (e as any).loc?.line === "number") {
+      const errorLine: number = (e as any).loc.line;
+      warnings.push(`Truncated at line ${errorLine}: ${(e as Error).message}`);
+      const lines = source.split("\n");
+      const partialSource = lines.slice(0, errorLine - 1).join("\n");
+      if (partialSource.trim()) {
+        try {
+          return { ast: babelParse(partialSource, PARSE_OPTIONS), warnings };
+        } catch {
+          // noop — fall through to empty parse
+        }
+      }
+    }
+
+    // Last resort: empty program
+    warnings.push("Could not parse source; returned empty program");
+    return { ast: babelParse("", { ...PARSE_OPTIONS, sourceType: "script" }), warnings };
+  }
+}
+
 export function generate(ast: File): string {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const result = babelGenerate(ast as any, {

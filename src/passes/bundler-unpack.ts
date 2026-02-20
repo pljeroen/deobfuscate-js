@@ -22,19 +22,35 @@ export const bundlerUnpackPass: ASTPass = {
     const program = ast.program;
     const body = program.body;
 
-    // Bundle is typically a single ExpressionStatement containing an IIFE
-    if (body.length !== 1 || !t.isExpressionStatement(body[0])) return ast;
+    // Bundle is typically a single ExpressionStatement containing an IIFE,
+    // possibly preceded by "use strict" or a banner comment.
+    let iifeExpr: t.CallExpression | null = null;
 
-    const expr = body[0].expression;
-    if (!t.isCallExpression(expr)) return ast;
+    if (body.length === 1 && t.isExpressionStatement(body[0]) && t.isCallExpression(body[0].expression)) {
+      iifeExpr = body[0].expression;
+    } else if (body.length === 2 && t.isExpressionStatement(body[0]) && t.isExpressionStatement(body[1])) {
+      // Handle "use strict"; (function...)(modules) pattern
+      const first = body[0].expression;
+      if (t.isStringLiteral(first) && first.value === "use strict" && t.isCallExpression(body[1].expression)) {
+        iifeExpr = body[1].expression;
+      }
+    }
+
+    if (!iifeExpr) return ast;
 
     // Try each bundler pattern
-    const modules = detectWebpack4(expr) ?? detectWebpack5(expr) ?? detectBrowserify(expr);
-    if (!modules || modules.length === 0) return ast;
+    const detection = detectWebpack4(iifeExpr) ?? detectWebpack5(iifeExpr) ?? detectBrowserify(iifeExpr);
+    if (!detection || detection.modules.length === 0) return ast;
 
-    // Replace program body with extracted module functions
-    const newBody: t.Statement[] = [];
-    for (const mod of modules) {
+    // Build metadata comment
+    const comment = ` ${detection.type} bundle | ${detection.modules.length} modules`;
+
+    // Replace program body with metadata comment + extracted module functions
+    const commentNode = t.expressionStatement(t.stringLiteral(""));
+    t.addComment(commentNode, "leading", comment, false);
+
+    const newBody: t.Statement[] = [commentNode];
+    for (const mod of detection.modules) {
       newBody.push(mod);
     }
     program.body = newBody;
@@ -43,16 +59,16 @@ export const bundlerUnpackPass: ASTPass = {
   },
 };
 
-interface ExtractedModule {
-  id: string;
-  fn: t.FunctionExpression | t.ArrowFunctionExpression;
+interface DetectionResult {
+  type: string;
+  modules: t.Statement[];
 }
 
 /**
  * Detect webpack 4 pattern:
  *   (function(modules) { ... __webpack_require__ ... })([ fn, fn ] or { 0: fn, 1: fn })
  */
-function detectWebpack4(expr: t.CallExpression): t.Statement[] | null {
+function detectWebpack4(expr: t.CallExpression): DetectionResult | null {
   const callee = unwrapCallee(expr);
   if (!callee) return null;
 
@@ -67,14 +83,15 @@ function detectWebpack4(expr: t.CallExpression): t.Statement[] | null {
   if (expr.arguments.length !== 1) return null;
   const arg = expr.arguments[0];
 
-  return extractModulesFrom(arg);
+  const modules = extractModulesFrom(arg);
+  return modules ? { type: "webpack", modules } : null;
 }
 
 /**
  * Detect webpack 5 pattern:
  *   (() => { var __webpack_modules__ = {...}; ... })()
  */
-function detectWebpack5(expr: t.CallExpression): t.Statement[] | null {
+function detectWebpack5(expr: t.CallExpression): DetectionResult | null {
   const callee = unwrapCallee(expr);
   if (!callee) return null;
 
@@ -93,7 +110,8 @@ function detectWebpack5(expr: t.CallExpression): t.Statement[] | null {
     for (const decl of stmt.declarations) {
       if (!t.isIdentifier(decl.id)) continue;
       if (decl.id.name === "__webpack_modules__" && decl.init) {
-        return extractModulesFrom(decl.init);
+        const modules = extractModulesFrom(decl.init);
+        return modules ? { type: "webpack5", modules } : null;
       }
     }
   }
@@ -105,7 +123,7 @@ function detectWebpack5(expr: t.CallExpression): t.Statement[] | null {
  * Detect browserify pattern:
  *   (function(t, n, r) { ... t[o][0].call ... })({id: [fn, deps]}, {}, [entries])
  */
-function detectBrowserify(expr: t.CallExpression): t.Statement[] | null {
+function detectBrowserify(expr: t.CallExpression): DetectionResult | null {
   const callee = unwrapCallee(expr);
   if (!callee) return null;
 
@@ -155,7 +173,7 @@ function detectBrowserify(expr: t.CallExpression): t.Statement[] | null {
     modules.push(createModuleFunction(moduleId, fnElement));
   }
 
-  return modules.length > 0 ? modules : null;
+  return modules.length > 0 ? { type: "browserify", modules } : null;
 }
 
 /**

@@ -68,3 +68,57 @@ export function runPipeline(
 export function filterSafePasses(passes: ASTPass[]): ASTPass[] {
   return passes.filter(p => p.safety !== "unsafe");
 }
+
+export interface PassReport {
+  name: string;
+  changed: boolean;
+}
+
+export interface PipelineResult {
+  code: string;
+  warnings: string[];
+  report: PassReport[];
+}
+
+/** Run full pipeline with structured output including per-pass reports and warnings. */
+export function runPipelineWithReport(
+  source: string,
+  astPasses: ASTPass[],
+  tokenPasses: TokenPass[],
+): PipelineResult {
+  const warnings: string[] = [];
+  const report: PassReport[] = [];
+
+  const maxIterations = 3;
+  let currentSource = source;
+  let ast = parse(currentSource);
+  let previousCode = "";
+
+  for (let i = 0; i < maxIterations; i++) {
+    for (const pass of astPasses) {
+      const before = generate(ast);
+      ast = pass.run(ast, currentSource);
+      const after = generate(ast);
+      const changed = before !== after;
+      report.push({ name: pass.name, changed });
+    }
+    const currentCode = generate(ast);
+    if (currentCode === previousCode) {
+      break;
+    }
+    previousCode = currentCode;
+    if (i < maxIterations - 1) {
+      currentSource = currentCode;
+      ast = parse(currentSource);
+    }
+  }
+
+  let code = previousCode || generate(ast);
+  for (const pass of tokenPasses) {
+    const before = code;
+    code = pass.run(code);
+    report.push({ name: pass.name, changed: before !== code });
+  }
+
+  return { code, warnings, report };
+}
