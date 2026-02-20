@@ -16,6 +16,7 @@ import { astRenamePass } from "./passes/ast-rename.js";
 import { controlFlowObjectPass } from "./passes/control-flow-object.js";
 import { controlFlowUnflattenPass } from "./passes/control-flow-unflatten.js";
 import { stringArrayPass } from "./passes/string-array.js";
+import { stringArrayStaticPass } from "./passes/string-array-static.js";
 import { bundlerUnpackPass } from "./passes/bundler-unpack.js";
 import { semanticRenamePass } from "./passes/semantic-rename.js";
 import { antiDebugPass } from "./passes/anti-debug.js";
@@ -29,7 +30,7 @@ const positionalArgs = args.filter(a => !a.startsWith("--"));
 const inputPath = positionalArgs[0] ?? resolve("input/lodash.min.js");
 const outputPath = positionalArgs[1] ?? resolve("output/lodash.deobfuscated.js");
 
-const allASTPasses: ASTPass[] = [bundlerUnpackPass, constantFoldPass, constantPropagatePass, deadCodeEliminatePass, hexDecodePass, stringArrayPass, controlFlowObjectPass, controlFlowUnflattenPass, antiDebugPass, constantPropagatePass, deadCodeEliminatePass, astSimplifyPass, semanticRenamePass, astRenamePass];
+const allASTPasses: ASTPass[] = [bundlerUnpackPass, constantFoldPass, constantPropagatePass, deadCodeEliminatePass, hexDecodePass, stringArrayStaticPass, stringArrayPass, controlFlowObjectPass, controlFlowUnflattenPass, antiDebugPass, constantPropagatePass, deadCodeEliminatePass, astSimplifyPass, semanticRenamePass, astRenamePass];
 
 const astPasses = unsafeMode ? allASTPasses : filterSafePasses(allASTPasses);
 
@@ -48,7 +49,7 @@ if (inputStat.size > MAX_INPUT_BYTES) {
 
 const source = readFileSync(inputPath, "utf-8");
 
-const { code, warnings, report } = runPipelineWithReport(source, astPasses, [formatPass]);
+const { code, warnings, report, iterations, initialEntropy, finalEntropy } = runPipelineWithReport(source, astPasses, [formatPass]);
 
 writeFileSync(outputPath, code, "utf-8");
 
@@ -57,7 +58,8 @@ for (const warning of warnings) {
 }
 
 if (verboseMode) {
-  process.stderr.write("\nPass report:\n");
+  process.stderr.write(`\nPipeline: ${iterations} iteration(s), entropy ${initialEntropy.toFixed(2)} → ${finalEntropy.toFixed(2)}\n`);
+  process.stderr.write("Pass report:\n");
   for (const entry of report) {
     process.stderr.write(`  ${entry.name}: ${entry.changed ? "changed" : "no change"}\n`);
   }

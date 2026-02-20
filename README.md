@@ -1,6 +1,6 @@
 # deobfuscate-js
 
-![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-395%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-430%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
 
 JavaScript de-obfuscation toolkit. Reverses javascript-obfuscator/obfuscator.io transforms (string array encoding, control flow flattening, proxy function objects, anti-debug traps) and handles webpack/browserify bundles. Combines AST-based transforms with token-level formatting to produce readable output from obfuscated or minified JavaScript.
 
@@ -28,7 +28,7 @@ All passes implement the `ASTPass` or `TokenPass` interface (defined in `src/typ
 
 ## Pipeline
 
-The 14 AST passes and 1 token pass run in the order below. Some passes appear twice in the pipeline (constant propagation and dead code elimination run both before and after the obfuscator-specific passes to clean up their output).
+The 15 AST passes and 1 token pass run in the order below. Some passes appear twice in the pipeline (constant propagation and dead code elimination run both before and after the obfuscator-specific passes to clean up their output). The pipeline uses fingerprint-guided pass selection to skip obfuscator-specific passes when no obfuscation patterns are detected.
 
 | # | Pass | File | Description |
 |---|---|---|---|
@@ -37,15 +37,16 @@ The 14 AST passes and 1 token pass run in the order below. Some passes appear tw
 | 3 | Constant Propagate | `constant-propagate.ts` | Inline variables assigned once to a literal, identifier alias, or constant array |
 | 4 | Dead Code Eliminate | `dead-code-eliminate.ts` | Remove `if(false)` blocks, unreachable statements, unused variables/functions |
 | 5 | Hex/Unicode Decode | `hex-decode.ts` | Decode `\xHH`, `\uHHHH`, `\u{HHHH}` escapes and hex numeric literals |
-| 6 | String Array | `string-array.ts` | Resolve string array obfuscation via V8 isolate sandbox execution (unsafe) |
-| 7 | Control Flow Object | `control-flow-object.ts` | Inline control flow storage objects (proxy functions, string literals) |
-| 8 | Control Flow Unflatten | `control-flow-unflatten.ts` | Reconstruct linear flow from `while(!![])/switch` dispatch pattern |
-| 9 | Anti-Debug | `anti-debug.ts` | Remove `.constructor("debugger")` traps, console overrides, self-defending guards |
-| 10 | Constant Propagate | `constant-propagate.ts` | Second pass -- clean up constants exposed by passes 6-9 |
-| 11 | Dead Code Eliminate | `dead-code-eliminate.ts` | Second pass -- remove dead code exposed by passes 6-10 |
-| 12 | AST Simplify | `ast-simplify.ts` | Split comma expressions into separate statements, computed to dot access |
-| 13 | Semantic Rename | `semantic-rename.ts` | Rename `_0x`-prefixed variables by usage context (loop counters, `.length`, error params) |
-| 14 | Scope-Aware Rename | `ast-rename.ts` | Rename remaining single/two-letter minified names via Babel scope analysis |
+| 6 | String Array (Static) | `string-array-static.ts` | Resolve unencoded/base64 string arrays via static analysis (safe) |
+| 7 | String Array | `string-array.ts` | Resolve string array obfuscation via V8 isolate sandbox execution (unsafe) |
+| 8 | Control Flow Object | `control-flow-object.ts` | Inline control flow storage objects (proxy functions, string literals) |
+| 9 | Control Flow Unflatten | `control-flow-unflatten.ts` | Reconstruct linear flow from dispatch patterns (pipe-delimited + arithmetic) |
+| 10 | Anti-Debug | `anti-debug.ts` | Remove `.constructor("debugger")` traps, console overrides, self-defending guards |
+| 11 | Constant Propagate | `constant-propagate.ts` | Second pass -- clean up constants exposed by passes 7-10 |
+| 12 | Dead Code Eliminate | `dead-code-eliminate.ts` | Second pass -- remove dead code exposed by passes 7-11 |
+| 13 | AST Simplify | `ast-simplify.ts` | Split comma expressions into separate statements, computed to dot access |
+| 14 | Semantic Rename | `semantic-rename.ts` | Rename `_0x`-prefixed variables by usage context (loop counters, arrays, JSON, regex, events) |
+| 15 | Scope-Aware Rename | `ast-rename.ts` | Rename remaining single/two-letter minified names via Babel scope analysis |
 | T1 | Format | `format.ts` | Token-level pretty-print with 2-space indentation and proper whitespace |
 
 All pass source files are in `src/passes/`.
@@ -176,6 +177,11 @@ Renames obfuscated `_0x`-prefixed variables based on usage context:
 | For-loop counter (`for (var _0x = 0; ...)`) | `i`, `j`, `k`, ... |
 | `.length` assignment (`var _0x = arr.length`) | `len` |
 | Error-first callback first param | `err` |
+| Array method usage (`.push`, `.forEach`, `.map`) | `arr` |
+| `JSON.parse()` result | `data` |
+| RegExp literal or `.test()`/`.exec()` usage | `pattern` |
+| Arithmetic-only usage | `num` |
+| `addEventListener` callback parameter | `event` |
 
 Only renames identifiers matching the `_0x` prefix pattern. Does not touch meaningful names, globals, or non-obfuscated code.
 
@@ -229,7 +235,16 @@ Analyzes an AST (`src/fingerprint.ts`) to identify the obfuscation tool used. Cu
 - **String array + decoder** -- array of strings with a decoder function
 - **Control flow flattening** -- `while(!![])/switch` with `.split('|')` order string
 
-Returns the identified obfuscator name, confidence score, and list of detected patterns.
+Returns the identified obfuscator name, confidence score, and list of detected patterns. The fingerprint result drives pass selection: obfuscator-specific passes (string-array, control-flow-object, control-flow-unflatten, anti-debug) are skipped when no obfuscation patterns are detected, reducing processing time for minified-but-not-obfuscated JavaScript.
+
+### Pipeline Context & Entropy Tracking
+
+Passes share metadata through a `PipelineContext` object threaded through the pipeline. Currently carries:
+
+- **Fingerprint result** -- obfuscator detection used for pass selection
+- **Arbitrary metadata** -- passes can write/read typed data for cross-pass communication
+
+Shannon entropy of identifier names is computed at pipeline start and end, measuring deobfuscation progress. Higher entropy indicates more random/obfuscated names; entropy decreases as rename passes produce readable identifiers. Visible via `--verbose` flag.
 
 ### Multi-Parser Fallback
 
@@ -276,7 +291,7 @@ Both tools produce syntactically valid output on all samples. Losses are minor (
 ## Testing
 
 ```bash
-npm test           # run all tests (395)
+npm test           # run all tests (430)
 npm run test:watch # watch mode
 ```
 

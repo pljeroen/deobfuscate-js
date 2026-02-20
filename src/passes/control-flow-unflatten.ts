@@ -38,7 +38,7 @@ export const controlFlowUnflattenPass: ASTPass = {
       iterations++;
       traverse(ast, {
         WhileStatement(path) {
-          if (unflattenDispatch(path)) {
+          if (unflattenDispatch(path) || unflattenArithmeticDispatch(path)) {
             changed = true;
           }
         },
@@ -232,4 +232,140 @@ function removeBindingDeclaration(binding: ReturnType<NodePath["scope"]["getBind
   if (declPath && t.isVariableDeclaration(declPath.node) && declPath.node.declarations.length === 1) {
     declPath.remove();
   }
+}
+
+/**
+ * Unflatten arithmetic state-machine dispatchers:
+ *   var state = initialValue;
+ *   while (true) { switch (state) { case N: ...; state = M; continue; } break; }
+ *
+ * Resolves execution order by tracing state transitions statically.
+ * Only handles deterministic transitions (state = constant).
+ */
+function unflattenArithmeticDispatch(whilePath: NodePath<t.WhileStatement>): boolean {
+  if (!isConstantTruthy(whilePath.node.test)) return false;
+
+  const body = whilePath.node.body;
+  if (!t.isBlockStatement(body)) return false;
+  if (body.body.length !== 2) return false;
+  if (!t.isSwitchStatement(body.body[0])) return false;
+  if (!t.isBreakStatement(body.body[1])) return false;
+
+  const switchStmt = body.body[0] as t.SwitchStatement;
+
+  // Discriminant must be a simple identifier (the state variable)
+  if (!t.isIdentifier(switchStmt.discriminant)) return false;
+  const stateVarName = switchStmt.discriminant.name;
+
+  // Resolve the initial state value
+  const stateBinding = whilePath.scope.getBinding(stateVarName);
+  if (!stateBinding || !stateBinding.path.isVariableDeclarator()) return false;
+  const initNode = stateBinding.path.node.init;
+  if (!t.isNumericLiteral(initNode)) return false;
+  const initialState = initNode.value;
+
+  // Build case map: numeric case label → { body statements, next state }
+  const caseMap = new Map<number, { stmts: t.Statement[]; nextState: number | null }>();
+  let terminalState: number | null = null;
+
+  for (const switchCase of switchStmt.cases) {
+    if (!switchCase.test) return false; // no default case
+    if (!t.isNumericLiteral(switchCase.test) && !t.isUnaryExpression(switchCase.test)) return false;
+
+    let label: number;
+    if (t.isNumericLiteral(switchCase.test)) {
+      label = switchCase.test.value;
+    } else if (
+      t.isUnaryExpression(switchCase.test) &&
+      switchCase.test.operator === "-" &&
+      t.isNumericLiteral(switchCase.test.argument)
+    ) {
+      label = -switchCase.test.argument.value;
+    } else {
+      return false;
+    }
+
+    const consequent = switchCase.consequent;
+    if (consequent.length === 0) return false;
+
+    const lastStmt = consequent[consequent.length - 1];
+
+    // Check for terminal case: ends with break (not continue)
+    if (t.isBreakStatement(lastStmt) && !lastStmt.label) {
+      terminalState = label;
+      caseMap.set(label, { stmts: [], nextState: null });
+      continue;
+    }
+
+    // Must end with continue
+    if (!t.isContinueStatement(lastStmt) || lastStmt.label) return false;
+
+    // Find the state assignment: state = constant
+    const bodyWithoutContinue = consequent.slice(0, -1);
+    let nextState: number | null = null;
+    const stmtsWithoutStateAssign: t.Statement[] = [];
+
+    for (const stmt of bodyWithoutContinue) {
+      if (
+        t.isExpressionStatement(stmt) &&
+        t.isAssignmentExpression(stmt.expression) &&
+        stmt.expression.operator === "=" &&
+        t.isIdentifier(stmt.expression.left) &&
+        stmt.expression.left.name === stateVarName
+      ) {
+        // state = constant
+        if (t.isNumericLiteral(stmt.expression.right)) {
+          nextState = stmt.expression.right.value;
+        } else if (
+          t.isUnaryExpression(stmt.expression.right) &&
+          stmt.expression.right.operator === "-" &&
+          t.isNumericLiteral(stmt.expression.right.argument)
+        ) {
+          nextState = -stmt.expression.right.argument.value;
+        } else {
+          // Non-deterministic state transition — bail out
+          return false;
+        }
+      } else {
+        stmtsWithoutStateAssign.push(stmt);
+      }
+    }
+
+    if (nextState === null) return false; // No state transition found
+    caseMap.set(label, { stmts: stmtsWithoutStateAssign, nextState });
+  }
+
+  // Trace execution order starting from initial state
+  const order: number[] = [];
+  const visited = new Set<number>();
+  let currentState: number | null = initialState;
+  const MAX_TRACE = 1000;
+
+  while (currentState !== null && !visited.has(currentState) && order.length < MAX_TRACE) {
+    visited.add(currentState);
+    const entry = caseMap.get(currentState);
+    if (!entry) return false; // Missing case
+
+    order.push(currentState);
+    currentState = entry.nextState;
+  }
+
+  if (order.length === 0) return false;
+
+  // Build ordered statement list
+  const orderedStatements: t.Statement[] = [];
+  for (const state of order) {
+    const entry = caseMap.get(state)!;
+    if (entry.stmts.length > 0) {
+      orderedStatements.push(...entry.stmts);
+    }
+  }
+
+  // Replace while loop with ordered statements
+  whilePath.replaceWithMultiple(orderedStatements);
+
+  // Remove state variable declaration
+  removeBindingDeclaration(stateBinding);
+
+  return true;
 }

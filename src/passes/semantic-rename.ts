@@ -6,6 +6,11 @@
  * - For-loop counters → i, j, k, ...
  * - .length assignments → len
  * - Error-first callback first param → err
+ * - Array usage (.push, .pop, .forEach, .map, etc.) → arr
+ * - JSON.parse() result → data
+ * - RegExp usage (.test, .exec, assigned from regex) → pattern
+ * - Arithmetic-only usage → num
+ * - addEventListener callback param → event
  */
 
 import { traverse, t } from "../babel.js";
@@ -158,6 +163,21 @@ export const semanticRenamePass: ASTPass = {
       },
     });
 
+    // Detect array usage: .push, .pop, .forEach, .map, .filter, .reduce, .splice, .slice
+    detectUsagePattern(ast, scopeRenames, globalUsedNames, isArrayUsage, ["arr", "items", "list"]);
+
+    // Detect JSON.parse result
+    detectInitPattern(ast, scopeRenames, globalUsedNames, isJsonParseInit, ["data", "parsed"]);
+
+    // Detect regex usage: assigned from regex literal, or .test/.exec called on it
+    detectUsagePattern(ast, scopeRenames, globalUsedNames, isRegexUsage, ["pattern", "regex"]);
+
+    // Detect arithmetic-only usage
+    detectUsagePattern(ast, scopeRenames, globalUsedNames, isArithmeticUsage, ["num", "value"]);
+
+    // Detect addEventListener callback event param
+    detectEventParam(ast, scopeRenames, globalUsedNames);
+
     // Apply renames via scope API — each binding renamed independently
     if (scopeRenames.size > 0) {
       traverse(ast, {
@@ -187,4 +207,210 @@ function getScopeUsedNames(scope: any): Set<string> {
     names.add(name);
   }
   return names;
+}
+
+// --- Type-informed pattern detection ---
+
+const ARRAY_METHODS = new Set(["push", "pop", "shift", "unshift", "splice", "slice", "forEach", "map", "filter", "reduce", "find", "some", "every", "indexOf", "includes", "concat", "sort", "reverse", "flat", "flatMap"]);
+
+const REGEX_METHODS = new Set(["test", "exec"]);
+const STRING_REGEX_METHODS = new Set(["match", "search", "replace", "replaceAll"]);
+
+/** Check if a binding is used primarily with array methods. */
+function isArrayUsage(binding: any): boolean {
+  let arrayMethodCount = 0;
+  let totalRefs = 0;
+
+  for (const ref of binding.referencePaths) {
+    totalRefs++;
+    const parent = ref.parent;
+    // obj.method() where obj is the binding
+    if (
+      t.isMemberExpression(parent) &&
+      t.isIdentifier(parent.property) &&
+      ARRAY_METHODS.has(parent.property.name) &&
+      ref.node === parent.object
+    ) {
+      arrayMethodCount++;
+    }
+  }
+
+  return totalRefs > 0 && arrayMethodCount >= 1;
+}
+
+/** Check if initializer is JSON.parse(). */
+function isJsonParseInit(binding: any): boolean {
+  const declarator = binding.path.node;
+  if (!t.isVariableDeclarator(declarator)) return false;
+  const init = declarator.init;
+  if (!t.isCallExpression(init)) return false;
+  const callee = init.callee;
+  return (
+    t.isMemberExpression(callee) &&
+    t.isIdentifier(callee.object) &&
+    callee.object.name === "JSON" &&
+    t.isIdentifier(callee.property) &&
+    callee.property.name === "parse"
+  );
+}
+
+/** Check if a binding is used primarily with regex methods or assigned from regex literal. */
+function isRegexUsage(binding: any): boolean {
+  // Assigned from regex literal
+  const declarator = binding.path.node;
+  if (t.isVariableDeclarator(declarator) && t.isRegExpLiteral(declarator.init)) {
+    return true;
+  }
+
+  // Used with .test() or .exec()
+  for (const ref of binding.referencePaths) {
+    const parent = ref.parent;
+    if (
+      t.isMemberExpression(parent) &&
+      t.isIdentifier(parent.property) &&
+      REGEX_METHODS.has(parent.property.name) &&
+      ref.node === parent.object
+    ) {
+      return true;
+    }
+    // Used as argument to string.match(), string.replace(), etc.
+    const grandparent = ref.parentPath?.parent;
+    if (
+      t.isCallExpression(ref.parent) &&
+      t.isMemberExpression((ref.parent as any).callee) &&
+      t.isIdentifier((ref.parent as any).callee.property) &&
+      STRING_REGEX_METHODS.has((ref.parent as any).callee.property.name)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/** Check if a binding is used exclusively in arithmetic operations. */
+function isArithmeticUsage(binding: any): boolean {
+  const ARITH_OPS = new Set(["+", "-", "*", "/", "%", "**", "++", "--", "+=", "-=", "*=", "/="]);
+  let arithmeticCount = 0;
+  let totalRefs = 0;
+
+  for (const ref of binding.referencePaths) {
+    totalRefs++;
+    const parent = ref.parent;
+    if (t.isBinaryExpression(parent) && ARITH_OPS.has(parent.operator)) {
+      arithmeticCount++;
+    } else if (t.isUpdateExpression(parent)) {
+      arithmeticCount++;
+    } else if (t.isAssignmentExpression(parent) && ARITH_OPS.has(parent.operator)) {
+      arithmeticCount++;
+    }
+  }
+
+  // Must have at least 2 arithmetic uses and >50% of all uses
+  return totalRefs >= 2 && arithmeticCount / totalRefs > 0.5;
+}
+
+/** Detect variables matching a usage predicate and rename them. */
+function detectUsagePattern(
+  ast: File,
+  scopeRenames: Map<string, { oldName: string; newName: string }>,
+  globalUsedNames: Set<string>,
+  predicate: (binding: any) => boolean,
+  candidates: string[],
+): void {
+  traverse(ast, {
+    VariableDeclarator(path) {
+      if (!t.isIdentifier(path.node.id)) return;
+      const name = path.node.id.name;
+      if (!isObfuscatedName(name)) return;
+
+      const binding = path.scope.getBinding(name);
+      if (!binding) return;
+      const uid = `${name}@${binding.identifier.start}`;
+      if (scopeRenames.has(uid)) return;
+
+      if (predicate(binding)) {
+        const scopeUsed = getScopeUsedNames(path.scope);
+        for (const candidate of candidates) {
+          if (!globalUsedNames.has(candidate) || !scopeUsed.has(candidate)) {
+            scopeRenames.set(uid, { oldName: name, newName: candidate });
+            return;
+          }
+        }
+      }
+    },
+  });
+}
+
+/** Detect variables matching an initializer predicate and rename them. */
+function detectInitPattern(
+  ast: File,
+  scopeRenames: Map<string, { oldName: string; newName: string }>,
+  globalUsedNames: Set<string>,
+  predicate: (binding: any) => boolean,
+  candidates: string[],
+): void {
+  traverse(ast, {
+    VariableDeclarator(path) {
+      if (!t.isIdentifier(path.node.id)) return;
+      const name = path.node.id.name;
+      if (!isObfuscatedName(name)) return;
+
+      const binding = path.scope.getBinding(name);
+      if (!binding) return;
+      const uid = `${name}@${binding.identifier.start}`;
+      if (scopeRenames.has(uid)) return;
+
+      if (predicate(binding)) {
+        const scopeUsed = getScopeUsedNames(path.scope);
+        for (const candidate of candidates) {
+          if (!globalUsedNames.has(candidate) || !scopeUsed.has(candidate)) {
+            scopeRenames.set(uid, { oldName: name, newName: candidate });
+            return;
+          }
+        }
+      }
+    },
+  });
+}
+
+/** Detect addEventListener event parameter pattern. */
+function detectEventParam(
+  ast: File,
+  scopeRenames: Map<string, { oldName: string; newName: string }>,
+  globalUsedNames: Set<string>,
+): void {
+  traverse(ast, {
+    CallExpression(path) {
+      // Look for x.addEventListener("event", function(_0x...) {...})
+      const callee = path.node.callee;
+      if (!t.isMemberExpression(callee)) return;
+      if (!t.isIdentifier(callee.property) || callee.property.name !== "addEventListener") return;
+      if (path.node.arguments.length < 2) return;
+
+      const handler = path.node.arguments[1];
+      if (!t.isFunctionExpression(handler) && !t.isArrowFunctionExpression(handler)) return;
+      if (handler.params.length < 1) return;
+
+      const param = handler.params[0];
+      if (!t.isIdentifier(param) || !isObfuscatedName(param.name)) return;
+
+      // Get the handler's scope — need to traverse into it
+      const handlerPath = path.get("arguments.1") as any;
+      if (!handlerPath || !handlerPath.scope) return;
+
+      const binding = handlerPath.scope.getBinding(param.name);
+      if (!binding) return;
+      const uid = `${param.name}@${binding.identifier.start}`;
+      if (scopeRenames.has(uid)) return;
+
+      const scopeUsed = getScopeUsedNames(handlerPath.scope);
+      for (const candidate of ["event", "evt"]) {
+        if (!globalUsedNames.has(candidate) || !scopeUsed.has(candidate)) {
+          scopeRenames.set(uid, { oldName: param.name, newName: candidate });
+          return;
+        }
+      }
+    },
+  });
 }

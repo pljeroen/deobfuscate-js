@@ -6,12 +6,22 @@
  * Full pipeline: AST passes first, then token passes on generated output
  */
 
-import type { ASTPass, TokenPass } from "./types.js";
+import type { ASTPass, TokenPass, PipelineContext } from "./types.js";
 import { parse, parseWithDiagnostics, generate } from "./parser.js";
+import { fingerprint } from "./fingerprint.js";
+import { identifierEntropy } from "./entropy.js";
 
 export interface ASTPipelineOptions {
   maxIterations?: number;
 }
+
+/** Pass names that target javascript-obfuscator patterns specifically. */
+const OBFUSCATOR_SPECIFIC_PASSES = new Set([
+  "string-array",
+  "control-flow-object",
+  "control-flow-unflatten",
+  "anti-debug",
+]);
 
 /**
  * Run AST passes with iterative convergence.
@@ -78,6 +88,9 @@ export interface PipelineResult {
   code: string;
   warnings: string[];
   report: PassReport[];
+  iterations: number;
+  initialEntropy: number;
+  finalEntropy: number;
 }
 
 /** Run full pipeline with structured output including per-pass reports and warnings. */
@@ -93,16 +106,44 @@ export function runPipelineWithReport(
   let currentSource = source;
   let { ast, warnings: parseWarnings } = parseWithDiagnostics(currentSource);
   warnings.push(...parseWarnings);
+
+  // QW1: Create pipeline context
+  const context: PipelineContext = { metadata: {} };
+
+  // QW2: Run fingerprint and store in context
+  const fp = fingerprint(ast);
+  context.fingerprint = fp;
+  const hasObfuscator = fp.obfuscator !== null;
+
+  // QW4: Compute initial entropy
+  const initialEntropy = identifierEntropy(ast);
+
   let previousCode = "";
+  let iterations = 0;
 
   for (let i = 0; i < maxIterations; i++) {
+    iterations++;
+    let anyChanged = false;
+
     for (const pass of astPasses) {
+      // QW2: Skip obfuscator-specific passes when no obfuscator detected
+      if (!hasObfuscator && OBFUSCATOR_SPECIFIC_PASSES.has(pass.name)) {
+        continue;
+      }
+
       const before = generate(ast);
-      ast = pass.run(ast, currentSource);
+      ast = pass.run(ast, currentSource, context);
       const after = generate(ast);
       const changed = before !== after;
       report.push({ name: pass.name, changed });
+      if (changed) anyChanged = true;
     }
+
+    // QW3: Early termination when no passes changed anything
+    if (!anyChanged) {
+      break;
+    }
+
     const currentCode = generate(ast);
     if (currentCode === previousCode) {
       break;
@@ -116,6 +157,9 @@ export function runPipelineWithReport(
     }
   }
 
+  // QW4: Compute final entropy
+  const finalEntropy = identifierEntropy(ast);
+
   let code = previousCode || generate(ast);
   for (const pass of tokenPasses) {
     const before = code;
@@ -123,5 +167,5 @@ export function runPipelineWithReport(
     report.push({ name: pass.name, changed: before !== code });
   }
 
-  return { code, warnings, report };
+  return { code, warnings, report, iterations, initialEntropy, finalEntropy };
 }

@@ -36,12 +36,20 @@ export interface Token {
 
 import type { File } from "@babel/types";
 
+import type { FingerprintResult } from "./fingerprint.js";
+
+// Cross-pass metadata shared through the pipeline
+export interface PipelineContext {
+  metadata: Record<string, unknown>;
+  fingerprint?: FingerprintResult;
+}
+
 // AST-based pass interface (operates on Babel AST)
 export interface ASTPass {
   name: string;
   description: string;
   safety?: "safe" | "unsafe";
-  run(ast: File, source?: string): File;
+  run(ast: File, source?: string, context?: PipelineContext): File;
 }
 
 // Token-based pass interface (operates on source string)
