@@ -1,21 +1,32 @@
 /**
  * V8 isolate sandbox using isolated-vm.
  *
- * Executes untrusted JavaScript in a genuine V8 isolate: separate heap,
- * no access to Node.js APIs (require, fs, net, process, etc.).
+ * Runs untrusted JavaScript in a separate V8 isolate with no Node globals
+ * exposed. Access to Node APIs only exists if explicitly bridged by the host.
  *
  * Security properties:
- * - Memory limit enforced at the V8 level (128MB default)
- * - CPU timeout enforced via script.runSync({ timeout })
- * - No file system access (no temp files, no I/O)
- * - No network access
- * - No require/module system
- * - No process object (shimmed for stdout.write output only)
+ * - Separate V8 heap with 128MB memory limit (engine-enforced)
+ * - Wall-clock timeout via V8 TerminateExecution (engine-enforced)
+ * - No require, fs, net, child_process, or any Node.js API
+ * - No file system I/O — execution is entirely in-memory
+ * - Deterministic: Date.now() frozen, Math.random() seeded
  *
- * Provides minimal shims for:
- * - process.stdout.write() — captures output
- * - Buffer.from(str, 'base64') — base64 decoding for obfuscator.io patterns
- * - atob/btoa — Web API base64
+ * Host bridge (3 callbacks, all string-in/string-out, all size-capped):
+ * - __write(str)  — appends to output buffer (10MB cap)
+ * - __atob(str)   — base64 decode (1MB input cap)
+ * - __btoa(str)   — base64 encode (1MB input cap)
+ *
+ * Provides minimal shims built on the bridge:
+ * - process.stdout.write() — captures output via __write
+ * - Buffer.from(str, 'base64') — base64 via __atob
+ * - atob/btoa — Web API base64 via __atob/__btoa
+ * - Date.now() / new Date() — frozen to constant (deterministic)
+ * - Math.random() — seeded xorshift32 PRNG (deterministic)
+ * - console.log/warn/error/info — no-ops (prevents ReferenceError)
+ *
+ * Supply chain note: isolated-vm is a native C++ addon. The security
+ * boundary shifts from "executing attacker JS" to "native addon correctness".
+ * Version is pinned to exact release to prevent unaudited updates.
  */
 
 import ivm from "isolated-vm";
@@ -63,6 +74,32 @@ var Buffer = {
     };
   }
 };
+
+// Determinism: freeze Date to a constant — bypasses timing-based anti-tamper
+(function() {
+  var FROZEN_TIME = 1700000000000;
+  var OrigDate = Date;
+  var FrozenDate = function() {
+    if (arguments.length === 0) return new OrigDate(FROZEN_TIME);
+    return new (Function.prototype.bind.apply(OrigDate, [null].concat(Array.prototype.slice.call(arguments))))();
+  };
+  FrozenDate.now = function() { return FROZEN_TIME; };
+  FrozenDate.parse = OrigDate.parse;
+  FrozenDate.UTC = OrigDate.UTC;
+  FrozenDate.prototype = OrigDate.prototype;
+  Date = FrozenDate;
+})();
+
+// Determinism: seeded xorshift32 PRNG — reproducible Math.random()
+(function() {
+  var seed = 0x2F6E2B1;
+  Math.random = function() {
+    seed ^= seed << 13;
+    seed ^= seed >> 17;
+    seed ^= seed << 5;
+    return (seed >>> 0) / 0x100000000;
+  };
+})();
 `;
 
 export function executeSandboxed(code: string, timeout = 5000): string {

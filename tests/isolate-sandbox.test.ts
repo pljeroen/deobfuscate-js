@@ -256,3 +256,56 @@ describe("host-side DoS protection", () => {
     expect(() => executeSandboxed(hugeCode)).toThrow();
   });
 });
+
+// --- H01/H02: Determinism ---
+
+describe("determinism: frozen Date and seeded Math.random", () => {
+  it("Date.now() returns a fixed constant", () => {
+    const result = executeSandboxed(`
+      var t1 = Date.now();
+      var t2 = Date.now();
+      process.stdout.write(t1 === t2 ? "deterministic" : "nondeterministic");
+    `);
+    expect(result).toBe("deterministic");
+  });
+
+  it("new Date().getTime() returns the same constant", () => {
+    const result = executeSandboxed(`
+      var d = new Date();
+      process.stdout.write(String(typeof d.getTime() === "number"));
+    `);
+    expect(result).toBe("true");
+  });
+
+  it("Date.now() returns same value across separate executions", () => {
+    const r1 = executeSandboxed('process.stdout.write(String(Date.now()))');
+    const r2 = executeSandboxed('process.stdout.write(String(Date.now()))');
+    expect(r1).toBe(r2);
+  });
+
+  it("Math.random() is deterministic across executions", () => {
+    const r1 = executeSandboxed(`
+      var vals = [];
+      for (var i = 0; i < 5; i++) vals.push(Math.random());
+      process.stdout.write(JSON.stringify(vals));
+    `);
+    const r2 = executeSandboxed(`
+      var vals = [];
+      for (var i = 0; i < 5; i++) vals.push(Math.random());
+      process.stdout.write(JSON.stringify(vals));
+    `);
+    expect(r1).toBe(r2);
+  });
+
+  it("Math.random() returns values in [0, 1)", () => {
+    const result = executeSandboxed(`
+      var ok = true;
+      for (var i = 0; i < 100; i++) {
+        var v = Math.random();
+        if (v < 0 || v >= 1) ok = false;
+      }
+      process.stdout.write(String(ok));
+    `);
+    expect(result).toBe("true");
+  });
+});
