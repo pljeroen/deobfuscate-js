@@ -1,13 +1,12 @@
 /**
- * Tests for hardening fixes (HARDEN-01 contract).
- * F8: Scope-safe constant propagation
- * F14: Exact dependency pinning
- * F17: Robust sandbox output parsing
+ * Tests for hardening fixes (HARDEN-01 + HARDEN-02 contracts).
+ * HARDEN-01: Scope-safe constant propagation, exact pinning, delimiter protocol
+ * HARDEN-02: Last-delimiter-wins, JSON payload size cap
  */
 import { describe, it, expect } from "vitest";
 import { parse, generate } from "../src/parser.js";
 import { constantPropagatePass } from "../src/passes/constant-propagate.js";
-import { stringArrayPass } from "../src/passes/string-array.js";
+import { stringArrayPass, extractDelimitedPayload } from "../src/passes/string-array.js";
 import { readFileSync } from "fs";
 import { resolve } from "path";
 
@@ -128,5 +127,62 @@ describe("H03: sandbox output delimiter protocol", () => {
     const output = generate(result);
     expect(output).toContain('"test1"');
     expect(output).toContain('"test2"');
+  });
+});
+
+// --- HARDEN-02: Last-delimiter-wins + JSON size cap ---
+
+describe("HARDEN-02 H01: last-delimiter-wins extraction", () => {
+  const DELIMITER = "__DEOBF_JSON_START__";
+
+  it("extracts JSON after single delimiter (normal case)", () => {
+    const output = `${DELIMITER}{"a":"hello"}`;
+    expect(extractDelimitedPayload(output)).toBe('{"a":"hello"}');
+  });
+
+  it("extracts JSON after LAST delimiter when multiple present", () => {
+    // Attacker emits delimiter + garbage, then real delimiter + valid JSON
+    const attackerGarbage = `${DELIMITER}{"pwned":true}garbage`;
+    const realOutput = `${DELIMITER}{"a":"hello"}`;
+    const output = attackerGarbage + realOutput;
+    const payload = extractDelimitedPayload(output);
+    expect(JSON.parse(payload)).toEqual({ a: "hello" });
+  });
+
+  it("throws on missing delimiter", () => {
+    expect(() => extractDelimitedPayload("no delimiter here")).toThrow(
+      /missing delimiter/i
+    );
+  });
+
+  it("handles stray stdout before delimiter", () => {
+    const output = `some random console output\n${DELIMITER}{"b":"world"}`;
+    expect(extractDelimitedPayload(output)).toBe('{"b":"world"}');
+  });
+});
+
+describe("HARDEN-02 H02: JSON payload size cap", () => {
+  const DELIMITER = "__DEOBF_JSON_START__";
+  const MAX_PAYLOAD = 10 * 1024 * 1024; // 10MB, matching sandbox output cap
+
+  it("accepts normal-sized payloads", () => {
+    const json = JSON.stringify({ key: "value" });
+    const output = `${DELIMITER}${json}`;
+    expect(extractDelimitedPayload(output)).toBe(json);
+  });
+
+  it("throws on payload exceeding size cap", () => {
+    const oversized = "x".repeat(MAX_PAYLOAD + 1);
+    const output = `${DELIMITER}${oversized}`;
+    expect(() => extractDelimitedPayload(output)).toThrow(/size cap/i);
+  });
+
+  it("error message includes actual size and cap", () => {
+    const size = MAX_PAYLOAD + 500;
+    const oversized = "x".repeat(size);
+    const output = `${DELIMITER}${oversized}`;
+    expect(() => extractDelimitedPayload(output)).toThrow(
+      new RegExp(String(size))
+    );
   });
 });

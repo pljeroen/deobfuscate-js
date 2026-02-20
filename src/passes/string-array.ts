@@ -23,6 +23,28 @@ import { executeSandboxed } from "../sandbox.js";
 // Handle CJS interop for generate (same pattern as babel.ts)
 const generateNode: typeof _generate = (_generate as any).default ?? _generate;
 
+const DELIMITER = "__DEOBF_JSON_START__";
+const MAX_PAYLOAD_BYTES = 10 * 1024 * 1024; // 10MB, matching sandbox output cap
+
+/**
+ * Extract JSON payload from sandbox output using the delimiter protocol.
+ * Uses lastIndexOf to prevent prefix injection attacks where attacker-controlled
+ * code emits the delimiter before the real output.
+ */
+export function extractDelimitedPayload(output: string): string {
+  const delimIdx = output.lastIndexOf(DELIMITER);
+  if (delimIdx === -1) {
+    throw new Error("Sandbox output missing delimiter — stray output may have corrupted result");
+  }
+  const payload = output.substring(delimIdx + DELIMITER.length);
+  if (payload.length > MAX_PAYLOAD_BYTES) {
+    throw new Error(
+      `JSON payload exceeds size cap: ${payload.length} bytes (cap: ${MAX_PAYLOAD_BYTES})`
+    );
+  }
+  return payload;
+}
+
 export const stringArrayPass: ASTPass = {
   name: "string-array",
   description: "Resolve string array obfuscation (decoder functions, rotation, encoding)",
@@ -351,10 +373,6 @@ function resolveViaSandbox(pattern: StringArrayPattern): SandboxResult | null {
       `try { var __v = ${callSource}; __results[${JSON.stringify(key)}] = typeof __v === "string" ? __v : null; } catch(e) {}`)
     .join("\n");
 
-  // Delimiter protocol: emit a unique marker before the JSON payload.
-  // If stray stdout occurs before the marker (from setup code polyfills,
-  // console output, etc.), the parser extracts only content after the delimiter.
-  const DELIMITER = "__DEOBF_JSON_START__";
   const script = `
 ${pattern.setupCode}
 var __results = {};
@@ -368,12 +386,7 @@ process.stdout.write("${DELIMITER}" + JSON.stringify(__results));
   const timeout = Math.max(5000, Math.min(15000, setupKB * 500 + calls.length * 50));
   const output = executeSandboxed(script, timeout);
 
-  // Extract JSON payload after the delimiter marker
-  const delimIdx = output.indexOf(DELIMITER);
-  if (delimIdx === -1) {
-    throw new Error("Sandbox output missing delimiter — stray output may have corrupted result");
-  }
-  const jsonPayload = output.substring(delimIdx + DELIMITER.length);
+  const jsonPayload = extractDelimitedPayload(output);
   const results: Record<string, unknown> = JSON.parse(jsonPayload);
 
   const resolved = new Map<string, string>();
