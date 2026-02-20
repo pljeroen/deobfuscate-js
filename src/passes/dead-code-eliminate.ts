@@ -26,7 +26,12 @@ export const deadCodeEliminatePass: ASTPass = {
         if (testResult.value) {
           // if(true) { A } else { B } -> A
           if (t.isBlockStatement(path.node.consequent)) {
-            path.replaceWithMultiple(path.node.consequent.body);
+            // If the block contains let/const, keep the block to preserve scoping
+            if (hasBlockScopedDecl(path.node.consequent)) {
+              path.replaceWith(path.node.consequent);
+            } else {
+              path.replaceWithMultiple(path.node.consequent.body);
+            }
           } else {
             path.replaceWith(path.node.consequent);
           }
@@ -34,7 +39,11 @@ export const deadCodeEliminatePass: ASTPass = {
           // if(false) { A } else { B } -> B (or remove entirely)
           if (path.node.alternate) {
             if (t.isBlockStatement(path.node.alternate)) {
-              path.replaceWithMultiple(path.node.alternate.body);
+              if (hasBlockScopedDecl(path.node.alternate)) {
+                path.replaceWith(path.node.alternate);
+              } else {
+                path.replaceWithMultiple(path.node.alternate.body);
+              }
             } else {
               path.replaceWith(path.node.alternate);
             }
@@ -151,6 +160,13 @@ export const deadCodeEliminatePass: ASTPass = {
     return ast;
   },
 };
+
+/** Check if a block statement contains let/const declarations (block-scoped) */
+function hasBlockScopedDecl(block: t.BlockStatement): boolean {
+  return block.body.some(
+    stmt => t.isVariableDeclaration(stmt) && (stmt.kind === "let" || stmt.kind === "const"),
+  );
+}
 
 function isPure(node: t.Node, allowIIFE = false): boolean {
   if (t.isLiteral(node)) return true;

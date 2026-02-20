@@ -16,10 +16,13 @@ export const constantFoldPass: ASTPass = {
 
   run(ast: File): File {
     let changed = true;
+    let iterations = 0;
+    const MAX_ITERATIONS = 100;
 
     // Iterate until no more changes (folding can expose new foldable expressions)
-    while (changed) {
+    while (changed && iterations < MAX_ITERATIONS) {
       changed = false;
+      iterations++;
 
       traverse(ast, {
         // !0 -> true, !1 -> false, !true -> false, !false -> true,
@@ -177,6 +180,7 @@ function evaluateBinary(op: string, lv: unknown, rv: unknown): unknown {
 function replaceWithValue(path: { replaceWith(node: t.Expression): void }, value: unknown): void {
   if (typeof value === "number") {
     if (!Number.isFinite(value)) return; // Don't fold to Infinity/NaN
+    if (Object.is(value, -0)) return; // Don't fold -0 to 0 (1/-0 !== 1/0)
     if (value < 0) {
       path.replaceWith(t.unaryExpression("-", t.numericLiteral(-value)));
     } else {

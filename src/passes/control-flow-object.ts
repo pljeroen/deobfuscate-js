@@ -29,8 +29,11 @@ export const controlFlowObjectPass: ASTPass = {
     mergeSequentialAssignments(ast);
 
     let changed = true;
-    while (changed) {
+    let iterations = 0;
+    const MAX_ITERATIONS = 50;
+    while (changed && iterations < MAX_ITERATIONS) {
       changed = false;
+      iterations++;
       traverse(ast, {
         VariableDeclaration(path) {
           if (inlineControlFlowObject(path)) {
@@ -119,25 +122,32 @@ function inlineControlFlowObject(path: NodePath<t.VariableDeclaration>): boolean
       if (!callPath || !t.isCallExpression(callPath.node)) continue;
       if (callPath.node.callee !== memberPath.node) continue;
 
-      const args = callPath.node.arguments as t.Expression[];
+      const rawArgs = callPath.node.arguments;
+      // Skip if any argument is a SpreadElement (cannot safely index into spread args)
+      if (rawArgs.some(a => t.isSpreadElement(a))) continue;
+      const args = rawArgs as t.Expression[];
       let replaced = false;
 
       if (info.type === "binary") {
+        if (info.leftIdx >= args.length || info.rightIdx >= args.length) continue;
         callPath.replaceWith(
           t.binaryExpression(info.operator, t.cloneNode(args[info.leftIdx]), t.cloneNode(args[info.rightIdx]))
         );
         replaced = true;
       } else if (info.type === "logical") {
+        if (info.leftIdx >= args.length || info.rightIdx >= args.length) continue;
         callPath.replaceWith(
           t.logicalExpression(info.operator, t.cloneNode(args[info.leftIdx]), t.cloneNode(args[info.rightIdx]))
         );
         replaced = true;
       } else if (info.type === "call") {
+        if (info.calleeIdx >= args.length) continue;
         const callee = t.cloneNode(args[info.calleeIdx]);
         let passedArgs: t.Expression[];
         if (info.hasRest) {
           passedArgs = args.slice(info.calleeIdx + 1).map(a => t.cloneNode(a));
         } else {
+          if (info.argIndices.some(i => i >= args.length)) continue;
           passedArgs = info.argIndices.map(i => t.cloneNode(args[i]));
         }
         callPath.replaceWith(t.callExpression(callee, passedArgs));
@@ -194,6 +204,9 @@ function mergeSequentialAssignments(ast: File): void {
           propName = left.property.name;
         }
         if (!propName) break;
+
+        // Stop merging if the RHS references the object itself (self-reference)
+        if (containsIdentifier(expr.right, objName)) break;
 
         const key = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(propName)
           ? t.identifier(propName)
@@ -357,6 +370,22 @@ function hasPropertyWrites(binding: { referencePaths: readonly NodePath[] }): bo
       (memberPath.parent as t.AssignmentExpression).left === memberPath.node
     ) {
       return true;
+    }
+  }
+  return false;
+}
+
+/** Check if a node tree contains a reference to a given identifier name */
+function containsIdentifier(node: t.Node, name: string): boolean {
+  if (t.isIdentifier(node) && node.name === name) return true;
+  for (const key of t.VISITOR_KEYS[node.type] || []) {
+    const child = (node as any)[key];
+    if (Array.isArray(child)) {
+      for (const c of child) {
+        if (t.isNode(c) && containsIdentifier(c, name)) return true;
+      }
+    } else if (t.isNode(child)) {
+      if (containsIdentifier(child, name)) return true;
     }
   }
   return false;

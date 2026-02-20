@@ -217,18 +217,27 @@ function matchPunctuator(s: string): string | null {
   return null;
 }
 
+/**
+ * Keywords that produce a value (and thus / after them is division, not regex).
+ * `this`, `true`, `false`, `null` evaluate to values — / after them is division.
+ * Other keywords like `return`, `typeof`, `void`, `new`, `delete`, `throw`, `case`,
+ * `in`, `instanceof` can precede regex.
+ */
+const VALUE_KEYWORDS = new Set(["this", "true", "false", "null"]);
+
 function canBeRegex(tokens: Token[]): boolean {
   // After these tokens, / is division, not regex
   const lastSignificant = findLastSignificant(tokens);
   if (!lastSignificant) return true;
   if (lastSignificant.type === TokenType.Identifier) return false;
   if (lastSignificant.type === TokenType.Number) return false;
+  if (lastSignificant.type === TokenType.String) return false;
   if (lastSignificant.type === TokenType.Punctuator) {
     return !["]", ")", "++", "--"].includes(lastSignificant.value);
   }
   if (lastSignificant.type === TokenType.Keyword) {
-    // keywords like `return`, `typeof` etc. can precede regex
-    return true;
+    // Value-producing keywords: / after them is division
+    return !VALUE_KEYWORDS.has(lastSignificant.value);
   }
   return true;
 }

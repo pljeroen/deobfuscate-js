@@ -31,8 +31,11 @@ export const controlFlowUnflattenPass: ASTPass = {
 
   run(ast: File): File {
     let changed = true;
-    while (changed) {
+    let iterations = 0;
+    const MAX_ITERATIONS = 50;
+    while (changed && iterations < MAX_ITERATIONS) {
       changed = false;
+      iterations++;
       traverse(ast, {
         WhileStatement(path) {
           if (unflattenDispatch(path)) {
@@ -125,11 +128,14 @@ function isConstantTruthy(node: t.Expression): boolean {
     t.isUnaryExpression(node) && node.operator === "!" &&
     t.isUnaryExpression(node.argument) && node.argument.operator === "!"
   ) {
+    const inner = node.argument.argument;
     // !![] — array literal is always truthy
-    if (t.isArrayExpression(node.argument.argument)) return true;
+    if (t.isArrayExpression(inner)) return true;
+    // !!true
+    if (t.isBooleanLiteral(inner) && inner.value === true) return true;
     // !!1, !!'x', etc. — any literal that's truthy
-    if (t.isNumericLiteral(node.argument.argument) && node.argument.argument.value !== 0) return true;
-    if (t.isStringLiteral(node.argument.argument) && node.argument.argument.value !== "") return true;
+    if (t.isNumericLiteral(inner) && inner.value !== 0) return true;
+    if (t.isStringLiteral(inner) && inner.value !== "") return true;
   }
 
   return false;

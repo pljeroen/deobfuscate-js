@@ -72,8 +72,10 @@ export const antiDebugPass: ASTPass = {
     // Phase 3: Remove calls/references to removed names — direct calls, setInterval, IIFEs containing them
     // Also handles SequenceExpressions (comma operator) by filtering individual sub-expressions.
     let changed = true;
-    while (changed) {
+    let phase3iters = 0;
+    while (changed && phase3iters < 50) {
       changed = false;
+      phase3iters++;
       traverse(ast, {
         ExpressionStatement(path) {
           const expr = path.node.expression;
@@ -106,8 +108,10 @@ export const antiDebugPass: ASTPass = {
     // Phase 4: Remove dead obfuscation artifacts — unreferenced _0x-named function/variable declarations
     // Only removes obfuscation-pattern names to avoid accidentally deleting business logic.
     changed = true;
-    while (changed) {
+    let phase4iters = 0;
+    while (changed && phase4iters < 50) {
       changed = false;
+      phase4iters++;
       traverse(ast, {
         FunctionDeclaration(path) {
           if (!path.node.id || !t.isIdentifier(path.node.id)) return;
@@ -225,26 +229,36 @@ function isConsoleOverride(fn: t.FunctionExpression | t.ArrowFunctionExpression)
   return found;
 }
 
-/** Check if a function body references any identifier from the given set */
+/** Check if a function body references any identifier from the given set.
+ *  Only matches identifiers in reference position — skips property keys,
+ *  non-computed member properties, and object property keys.
+ */
 function referencesAny(fn: t.FunctionExpression | t.ArrowFunctionExpression, names: Set<string>): boolean {
   let found = false;
   const body = t.isBlockStatement(fn.body) ? fn.body : null;
   if (!body) return false;
 
-  function walk(node: t.Node): void {
+  function walk(node: t.Node, parentNode?: t.Node, parentKey?: string): void {
     if (found) return;
     if (t.isIdentifier(node) && names.has(node.name)) {
-      found = true;
-      return;
+      // Skip non-computed property accesses (obj.name — 'name' is not a reference)
+      if (parentNode && t.isMemberExpression(parentNode) && parentKey === "property" && !parentNode.computed) {
+        // This is a property name, not a reference
+      } else if (parentNode && t.isObjectProperty(parentNode) && parentKey === "key" && !parentNode.computed) {
+        // This is an object key, not a reference
+      } else {
+        found = true;
+        return;
+      }
     }
     for (const key of t.VISITOR_KEYS[node.type] || []) {
       const child = (node as any)[key];
       if (Array.isArray(child)) {
         for (const c of child) {
-          if (t.isNode(c)) walk(c);
+          if (t.isNode(c)) walk(c, node, key);
         }
       } else if (t.isNode(child)) {
-        walk(child);
+        walk(child, node, key);
       }
     }
   }

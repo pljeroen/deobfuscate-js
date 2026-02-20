@@ -25,21 +25,26 @@ export const semanticRenamePass: ASTPass = {
   description: "Rename obfuscated variables based on usage context",
 
   run(ast: File): File {
-    const renames = new Map<string, string>();
-    const usedNames = new Set<string>();
+    // Per-scope renames: maps binding uid to new name
+    // This avoids the global map bug where the same old name in different scopes
+    // gets the same new name even when those scopes should be independent.
+    const scopeRenames = new Map<string, { oldName: string; newName: string }>();
+    const globalUsedNames = new Set<string>();
 
     // Collect existing non-obfuscated names to avoid conflicts
     traverse(ast, {
       Identifier(path) {
         if (!isObfuscatedName(path.node.name)) {
-          usedNames.add(path.node.name);
+          globalUsedNames.add(path.node.name);
         }
       },
     });
 
-    let counterIndex = 0;
+    // Track counter names assigned per function scope to avoid collisions
+    // Key: function scope uid, Value: set of counter names already assigned
+    const scopeCounterNames = new Map<string, Set<string>>();
 
-    // Detect for-loop counters
+    // Detect for-loop counters — per scope, so each function gets its own 'i'
     traverse(ast, {
       ForStatement(path) {
         const init = path.node.init;
@@ -47,7 +52,13 @@ export const semanticRenamePass: ASTPass = {
         const decl = init.declarations[0];
         if (!t.isIdentifier(decl.id)) return;
         const name = decl.id.name;
-        if (!isObfuscatedName(name) || renames.has(name)) return;
+        if (!isObfuscatedName(name)) return;
+
+        const binding = path.scope.getBinding(name);
+        if (!binding) return;
+        // Use binding's identifier object identity as unique key
+        const uid = `${name}@${binding.identifier.start}`;
+        if (scopeRenames.has(uid)) return;
 
         // Pattern: var _0x = 0; _0x < N; _0x++
         if (!t.isNumericLiteral(decl.init) || decl.init.value !== 0) return;
@@ -56,16 +67,25 @@ export const semanticRenamePass: ASTPass = {
         const update = path.node.update;
         if (!t.isUpdateExpression(update) || update.operator !== "++") return;
 
+        // Get the enclosing function scope for counter name tracking
+        const fnParent = path.getFunctionParent();
+        const scopeKey = fnParent ? String(fnParent.node.start ?? 0) : "program";
+        if (!scopeCounterNames.has(scopeKey)) {
+          scopeCounterNames.set(scopeKey, new Set<string>());
+        }
+        const usedCounters = scopeCounterNames.get(scopeKey)!;
+
+        let counterIdx = 0;
         let newName: string;
         do {
-          newName = counterIndex < COUNTER_NAMES.length
-            ? COUNTER_NAMES[counterIndex]
-            : `idx${counterIndex}`;
-          counterIndex++;
-        } while (usedNames.has(newName));
+          newName = counterIdx < COUNTER_NAMES.length
+            ? COUNTER_NAMES[counterIdx]
+            : `idx${counterIdx}`;
+          counterIdx++;
+        } while (globalUsedNames.has(newName) || usedCounters.has(newName));
 
-        renames.set(name, newName);
-        usedNames.add(newName);
+        usedCounters.add(newName);
+        scopeRenames.set(uid, { oldName: name, newName });
       },
     });
 
@@ -74,7 +94,12 @@ export const semanticRenamePass: ASTPass = {
       VariableDeclarator(path) {
         if (!t.isIdentifier(path.node.id)) return;
         const name = path.node.id.name;
-        if (!isObfuscatedName(name) || renames.has(name)) return;
+        if (!isObfuscatedName(name)) return;
+
+        const binding = path.scope.getBinding(name);
+        if (!binding) return;
+        const uid = `${name}@${binding.identifier.start}`;
+        if (scopeRenames.has(uid)) return;
 
         const init = path.node.init;
         if (
@@ -82,10 +107,10 @@ export const semanticRenamePass: ASTPass = {
           t.isIdentifier(init.property) &&
           init.property.name === "length"
         ) {
+          const scopeUsed = getScopeUsedNames(path.scope);
           let newName = "len";
-          if (usedNames.has(newName)) newName = "length_";
-          renames.set(name, newName);
-          usedNames.add(newName);
+          if (globalUsedNames.has(newName) && scopeUsed.has(newName)) newName = "length_";
+          scopeRenames.set(uid, { oldName: name, newName });
         }
       },
     });
@@ -97,7 +122,12 @@ export const semanticRenamePass: ASTPass = {
         if (params.length < 2) return;
         const first = params[0];
         if (!t.isIdentifier(first)) return;
-        if (!isObfuscatedName(first.name) || renames.has(first.name)) return;
+        if (!isObfuscatedName(first.name)) return;
+
+        const binding = path.scope.getBinding(first.name);
+        if (!binding) return;
+        const uid = `${first.name}@${binding.identifier.start}`;
+        if (scopeRenames.has(uid)) return;
 
         // Check if first param is thrown or used as if-test
         let isErrorParam = false;
@@ -121,19 +151,23 @@ export const semanticRenamePass: ASTPass = {
         });
 
         if (isErrorParam) {
-          const newName = usedNames.has("err") ? "error" : "err";
-          renames.set(first.name, newName);
-          usedNames.add(newName);
+          const scopeUsed = getScopeUsedNames(path.scope);
+          const newName = (globalUsedNames.has("err") && scopeUsed.has("err")) ? "error" : "err";
+          scopeRenames.set(uid, { oldName: first.name, newName });
         }
       },
     });
 
-    // Apply renames via scope API
-    if (renames.size > 0) {
+    // Apply renames via scope API — each binding renamed independently
+    if (scopeRenames.size > 0) {
       traverse(ast, {
         Scope(path) {
-          for (const [oldName, newName] of renames) {
-            if (path.scope.hasOwnBinding(oldName)) {
+          for (const [uid, { oldName, newName }] of scopeRenames) {
+            if (!path.scope.hasOwnBinding(oldName)) continue;
+            const binding = path.scope.getBinding(oldName);
+            if (!binding) continue;
+            const bindingUid = `${oldName}@${binding.identifier.start}`;
+            if (bindingUid === uid) {
               path.scope.rename(oldName, newName);
             }
           }
@@ -144,3 +178,13 @@ export const semanticRenamePass: ASTPass = {
     return ast;
   },
 };
+
+/** Get all names used in a scope's own bindings */
+function getScopeUsedNames(scope: any): Set<string> {
+  const names = new Set<string>();
+  const bindings = scope.bindings || {};
+  for (const name of Object.keys(bindings)) {
+    names.add(name);
+  }
+  return names;
+}

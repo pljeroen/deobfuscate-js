@@ -61,6 +61,11 @@ interface StringArrayPattern {
   uniqueCalls: Map<string, string>;
 }
 
+/** Escape special regex characters in a string for safe use in RegExp constructor */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 // --- Detection ---
 
 /** Extract original source text for a node, preserving exact formatting. */
@@ -155,7 +160,7 @@ function detectPattern(ast: File, source?: string): StringArrayPattern | null {
   // Find rotation IIFEs — IIFEs whose arguments reference the array name
   for (let i = 0; i < body.length; i++) {
     if (removeIndices.includes(i)) continue;
-    if (isIIFE(body[i]) && new RegExp(`\\b${arrayName}\\b`).test(nodeCode(body[i], source))) {
+    if (isIIFE(body[i]) && new RegExp(`\\b${escapeRegExp(arrayName)}\\b`).test(nodeCode(body[i], source))) {
       removeIndices.push(i);
     }
   }
@@ -198,7 +203,7 @@ function detectPattern(ast: File, source?: string): StringArrayPattern | null {
           node.params.filter(p => t.isIdentifier(p)).map(p => (p as t.Identifier).name),
         );
         const callsKnown = [...calleeNames].some(
-          cn => !paramNames.has(cn) && new RegExp(`\\b${cn}\\b`).test(bodyCode),
+          cn => !paramNames.has(cn) && new RegExp(`\\b${escapeRegExp(cn)}\\b`).test(bodyCode),
         );
         if (!callsKnown) return;
 
@@ -213,7 +218,7 @@ function detectPattern(ast: File, source?: string): StringArrayPattern | null {
           for (const d of stmt.declarations) {
             if (!t.isIdentifier(d.id)) continue;
             if (extractedContextNames.has(d.id.name)) continue;
-            if (new RegExp(`\\b${d.id.name}\\b`).test(bodyCode)) {
+            if (new RegExp(`\\b${escapeRegExp(d.id.name)}\\b`).test(bodyCode)) {
               extractedContextNames.add(d.id.name);
               scopedContextDefs.push(generateNode(stmt as any).code);
             }
@@ -261,7 +266,7 @@ function detectPattern(ast: File, source?: string): StringArrayPattern | null {
     if (t.isExpressionStatement(stmt) && t.isSequenceExpression(stmt.expression)) {
       const relevant = stmt.expression.expressions.filter(expr => {
         if (!isIIFECall(expr)) return false;
-        return new RegExp(`\\b${arrayName}\\b`).test(nodeCode(expr, source));
+        return new RegExp(`\\b${escapeRegExp(arrayName)}\\b`).test(nodeCode(expr, source));
       });
       if (relevant.length > 0) {
         return relevant.map(e => "(" + nodeCode(e, source) + ");").join("\n");
@@ -351,8 +356,9 @@ process.stdout.write(JSON.stringify(__results));
 `;
 
   // Scale timeout with setup complexity + number of calls (RC4 decoding can be slow)
+  // Cap at 15s to prevent DoS via attacker-controlled setup code size
   const setupKB = Math.ceil(pattern.setupCode.length / 1024);
-  const timeout = Math.max(5000, Math.min(60000, setupKB * 1000 + calls.length * 50));
+  const timeout = Math.max(5000, Math.min(15000, setupKB * 500 + calls.length * 50));
   const output = executeSandboxed(script, timeout);
   const results: Record<string, unknown> = JSON.parse(output);
 
@@ -478,7 +484,7 @@ function isWrapperFunction(stmt: t.Statement, decoderName: string): boolean {
 
   // Body must contain a call to decoderName
   const code = generateNode(fnBody as any).code;
-  const re = new RegExp(`\\b${decoderName}\\b`);
+  const re = new RegExp(`\\b${escapeRegExp(decoderName)}\\b`);
   return re.test(code);
 }
 
@@ -535,7 +541,7 @@ function bodyContainsName(stmt: t.Statement, name: string): boolean {
   }
   if (!body) return false;
   const code = generateNode(body as any).code;
-  const re = new RegExp(`\\b${name}\\b`);
+  const re = new RegExp(`\\b${escapeRegExp(name)}\\b`);
   return re.test(code);
 }
 
