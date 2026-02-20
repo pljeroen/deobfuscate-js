@@ -1,6 +1,6 @@
 # deobfuscate-js
 
-![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-379%20passing-green) ![Node](https://img.shields.io/badge/node-18%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-390%20passing-green) ![Node](https://img.shields.io/badge/node-18%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
 
 JavaScript de-obfuscation toolkit. Reverses javascript-obfuscator/obfuscator.io transforms (string array encoding, control flow flattening, proxy function objects, anti-debug traps) and handles webpack/browserify bundles. Combines AST-based transforms with token-level formatting to produce readable output from obfuscated or minified JavaScript.
 
@@ -266,7 +266,7 @@ Both tools produce syntactically valid output on all samples. Losses are minor (
 ## Testing
 
 ```bash
-npm test           # run all tests (379)
+npm test           # run all tests (390)
 npm run test:watch # watch mode
 ```
 
