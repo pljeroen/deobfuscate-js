@@ -351,11 +351,15 @@ function resolveViaSandbox(pattern: StringArrayPattern): SandboxResult | null {
       `try { var __v = ${callSource}; __results[${JSON.stringify(key)}] = typeof __v === "string" ? __v : null; } catch(e) {}`)
     .join("\n");
 
+  // Delimiter protocol: emit a unique marker before the JSON payload.
+  // If stray stdout occurs before the marker (from setup code polyfills,
+  // console output, etc.), the parser extracts only content after the delimiter.
+  const DELIMITER = "__DEOBF_JSON_START__";
   const script = `
 ${pattern.setupCode}
 var __results = {};
 ${resultAssignments}
-process.stdout.write(JSON.stringify(__results));
+process.stdout.write("${DELIMITER}" + JSON.stringify(__results));
 `;
 
   // Scale timeout with setup complexity + number of calls (RC4 decoding can be slow)
@@ -363,7 +367,14 @@ process.stdout.write(JSON.stringify(__results));
   const setupKB = Math.ceil(pattern.setupCode.length / 1024);
   const timeout = Math.max(5000, Math.min(15000, setupKB * 500 + calls.length * 50));
   const output = executeSandboxed(script, timeout);
-  const results: Record<string, unknown> = JSON.parse(output);
+
+  // Extract JSON payload after the delimiter marker
+  const delimIdx = output.indexOf(DELIMITER);
+  if (delimIdx === -1) {
+    throw new Error("Sandbox output missing delimiter — stray output may have corrupted result");
+  }
+  const jsonPayload = output.substring(delimIdx + DELIMITER.length);
+  const results: Record<string, unknown> = JSON.parse(jsonPayload);
 
   const resolved = new Map<string, string>();
   const failed = new Set<string>();

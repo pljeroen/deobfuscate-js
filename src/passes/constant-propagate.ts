@@ -44,15 +44,19 @@ export const constantPropagatePass: ASTPass = {
           return;
         }
 
-        // Propagate identifier aliases (const alias = original) when original is also constant
+        // Propagate identifier aliases (const alias = original) when original is also constant.
+        // Scope check: only replace at sites where the target resolves to the same binding,
+        // to avoid semantic changes when the target name is shadowed in an inner scope.
         if (t.isIdentifier(init.node)) {
           const targetBinding = path.scope.getBinding(init.node.name);
           if (!targetBinding) return;
           if (targetBinding.constantViolations.length > 0) return;
           for (const ref of [...binding.referencePaths]) {
-            if (ref.isIdentifier()) {
-              ref.replaceWith(t.cloneNode(init.node));
-            }
+            if (!ref.isIdentifier()) continue;
+            // Verify target resolves to the same binding at this reference site
+            const refTargetBinding = ref.scope.getBinding(init.node.name);
+            if (refTargetBinding !== targetBinding) continue;
+            ref.replaceWith(t.cloneNode(init.node));
           }
           return;
         }
