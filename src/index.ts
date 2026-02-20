@@ -3,7 +3,7 @@
  * de-obfuscation pipeline, writes output to output/.
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { runPipelineWithReport, filterSafePasses } from "./pipeline.js";
 import type { ASTPass } from "./types.js";
@@ -35,6 +35,15 @@ const astPasses = unsafeMode ? allASTPasses : filterSafePasses(allASTPasses);
 
 if (unsafeMode) {
   process.stderr.write("WARNING: Unsafe mode enabled — string-array pass will execute untrusted code\n");
+}
+
+const MAX_INPUT_BYTES = 20 * 1024 * 1024; // 20MB
+const inputStat = statSync(inputPath);
+if (inputStat.size > MAX_INPUT_BYTES) {
+  process.stderr.write(
+    `ERROR: Input file exceeds max size: ${inputStat.size} bytes (max: ${MAX_INPUT_BYTES} bytes / 20MB)\n`
+  );
+  process.exit(1);
 }
 
 const source = readFileSync(inputPath, "utf-8");

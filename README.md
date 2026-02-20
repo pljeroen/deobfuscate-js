@@ -1,6 +1,6 @@
 # deobfuscate-js
 
-![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-390%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-395%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
 
 JavaScript de-obfuscation toolkit. Reverses javascript-obfuscator/obfuscator.io transforms (string array encoding, control flow flattening, proxy function objects, anti-debug traps) and handles webpack/browserify bundles. Combines AST-based transforms with token-level formatting to produce readable output from obfuscated or minified JavaScript.
 
@@ -14,6 +14,8 @@ npm run deobfuscate -- --unsafe path/to/input.js  # enable string-array resoluti
 ```
 
 By default, only safe passes run. The `--unsafe` flag enables the string-array pass, which executes untrusted code in a V8 isolate sandbox.
+
+> **Warning:** The `--unsafe` flag executes sample code inside a V8 isolate. This reduces host exposure but is not intended as a hardened malware sandbox. Use only on samples you trust.
 
 ## Architecture
 
@@ -196,6 +198,12 @@ Re-emits the token stream with proper indentation and whitespace:
 - Context-aware unary operator handling
 - For-loop awareness (no line breaks inside `for(;;)`)
 
+## Stability Guarantees
+
+- **Safe passes never execute code.** They operate purely on the AST and are always semantic-preserving.
+- **Unsafe passes may skip on errors.** If sandbox execution times out, runs out of memory, or produces invalid output, the pass is skipped and the AST is returned unchanged.
+- **Correctness over aggression.** The tool prefers leaving code untransformed over applying a transformation that might change runtime behavior. When in doubt, it does nothing.
+
 ## Additional Features
 
 ### V8 Isolate Sandbox
@@ -210,6 +218,8 @@ The string array pass executes untrusted code in a **V8 isolate** (`src/sandbox.
 - **Version pinned** -- `isolated-vm` pinned to exact release (native C++ addon)
 
 Host bridge: `__write(str)` for stdout capture, `__atob(str)` / `__btoa(str)` for base64. All callbacks are string-in/string-out with size caps.
+
+Execution is deterministic: `Date.now()` returns a fixed constant and `Math.random()` uses a seeded PRNG. The same input always produces the same output, regardless of when or where it runs.
 
 ### Obfuscator Fingerprinting
 
@@ -266,7 +276,7 @@ Both tools produce syntactically valid output on all samples. Losses are minor (
 ## Testing
 
 ```bash
-npm test           # run all tests (390)
+npm test           # run all tests (395)
 npm run test:watch # watch mode
 ```
 

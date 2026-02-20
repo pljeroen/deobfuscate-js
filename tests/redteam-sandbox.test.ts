@@ -89,6 +89,39 @@ describe("HARDEN-03 H02: red-team sandbox fixtures", () => {
   }, 30000);
 });
 
+// --- POLISH-01 P01: Max input file size guard ---
+
+describe("POLISH-01 P01: max input file size guard", () => {
+  it("CLI rejects files exceeding 20MB", () => {
+    // Create a temp file larger than 20MB and attempt to process it
+    const { execFileSync } = require("child_process");
+    const { writeFileSync, unlinkSync, mkdtempSync } = require("fs");
+    const { join } = require("path");
+    const os = require("os");
+
+    const tmpDir = mkdtempSync(join(os.tmpdir(), "deobf-test-"));
+    const bigFile = join(tmpDir, "big.js");
+    // 20MB + 1 byte
+    writeFileSync(bigFile, "var x = " + "0".repeat(20 * 1024 * 1024) + ";");
+
+    try {
+      execFileSync(process.execPath, [
+        "--import", "tsx",
+        resolve(import.meta.dirname!, "../src/index.ts"),
+        bigFile, join(tmpDir, "out.js"),
+      ], { timeout: 10000, encoding: "utf-8" });
+      // Should not reach here
+      expect.unreachable("CLI should have rejected the file");
+    } catch (e: any) {
+      expect(e.status).not.toBe(0);
+      expect(e.stderr).toMatch(/exceeds.*max/i);
+    } finally {
+      try { unlinkSync(bigFile); } catch {}
+      try { unlinkSync(join(tmpDir, "out.js")); } catch {}
+    }
+  }, 30000);
+});
+
 // --- H01: Node engines field ---
 
 describe("HARDEN-03 H01: Node engines field", () => {
