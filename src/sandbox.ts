@@ -1,87 +1,93 @@
 /**
- * Process-isolated JavaScript execution sandbox.
+ * V8 isolate sandbox using isolated-vm.
  *
- * Spawns a child Node.js process to execute untrusted code.
- * Provides OS-level process isolation: separate address space,
- * enforced timeout via SIGTERM.
+ * Executes untrusted JavaScript in a genuine V8 isolate: separate heap,
+ * no access to Node.js APIs (require, fs, net, process, etc.).
  *
- * WARNING: This is NOT a security sandbox. While require() is blocked
- * via module wrapper override, a determined attacker could bypass this.
- * Only use on code you are willing to execute. The string-array pass
- * that uses this is marked safety: "unsafe" and requires --unsafe flag.
+ * Security properties:
+ * - Memory limit enforced at the V8 level (128MB default)
+ * - CPU timeout enforced via script.runSync({ timeout })
+ * - No file system access (no temp files, no I/O)
+ * - No network access
+ * - No require/module system
+ * - No process object (shimmed for stdout.write output only)
+ *
+ * Provides minimal shims for:
+ * - process.stdout.write() — captures output
+ * - Buffer.from(str, 'base64') — base64 decoding for obfuscator.io patterns
+ * - atob/btoa — Web API base64
  */
 
-import { execFileSync } from "child_process";
-import { writeFileSync, rmSync, mkdtempSync } from "fs";
-import { join } from "path";
-import { tmpdir } from "os";
+import ivm from "isolated-vm";
 
 /** Maximum sandbox timeout to prevent DoS (15 seconds) */
 const MAX_TIMEOUT = 15000;
 
+/** Memory limit for the V8 isolate in megabytes */
+const MEMORY_LIMIT_MB = 128;
+
 /**
- * Preamble injected before user code to restrict dangerous operations.
- * Blocks require() for fs, child_process, net, http, https, dgram, cluster, worker_threads.
- * This is defense-in-depth, not a security boundary.
+ * Preamble injected into the isolate to provide minimal API shims.
+ * These are thin wrappers around callbacks injected from the host.
  */
-const SANDBOX_PREAMBLE = `
-(function() {
-  var _origRequire = typeof require !== 'undefined' ? require : null;
-  var _blocked = new Set([
-    'fs', 'child_process', 'net', 'http', 'https', 'http2',
-    'dgram', 'cluster', 'worker_threads', 'vm', 'v8',
-    'fs/promises', 'node:fs', 'node:child_process', 'node:net',
-    'node:http', 'node:https', 'node:http2', 'node:dgram',
-    'node:cluster', 'node:worker_threads', 'node:vm', 'node:v8',
-    'node:fs/promises',
-  ]);
-  if (typeof require !== 'undefined') {
-    var _Module = require('module');
-    var _origResolve = _Module._resolveFilename;
-    _Module._resolveFilename = function(request) {
-      if (_blocked.has(request)) {
-        throw new Error('Module "' + request + '" is blocked in sandbox');
-      }
-      return _origResolve.apply(this, arguments);
+const ISOLATE_PREAMBLE = `
+var process = {
+  stdout: { write: function(s) { __write(String(s)); } },
+  env: {}
+};
+var console = {
+  log: function() {},
+  warn: function() {},
+  error: function() {},
+  info: function() {}
+};
+var atob = __atob;
+var btoa = __btoa;
+var Buffer = {
+  from: function(str, encoding) {
+    var decoded = str;
+    if (encoding === 'base64') {
+      decoded = __atob(str);
+    }
+    return {
+      toString: function() { return decoded; }
     };
   }
-  // Block process.env access beyond what we set
-  if (typeof process !== 'undefined') {
-    Object.defineProperty(process, 'env', {
-      value: Object.freeze(Object.assign({}, process.env)),
-      writable: false, configurable: false
-    });
-  }
-})();
+};
 `;
 
 export function executeSandboxed(code: string, timeout = 5000): string {
-  // Enforce timeout ceiling
   const effectiveTimeout = Math.min(timeout, MAX_TIMEOUT);
 
-  const dir = mkdtempSync(join(tmpdir(), "deobf-"));
-  const file = join(dir, "eval.js");
-  // Write preamble + user code with restricted permissions (owner read/write only)
-  writeFileSync(file, SANDBOX_PREAMBLE + code, { mode: 0o600 });
+  const isolate = new ivm.Isolate({ memoryLimit: MEMORY_LIMIT_MB });
   try {
-    return execFileSync(process.execPath, [
-      "--no-warnings",
-      "--disallow-code-generation-from-strings",
-      file,
-    ], {
-      timeout: effectiveTimeout,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-      // Restrict child environment: clear env vars that could leak paths/credentials
-      env: {
-        NODE_PATH: "",
-        HOME: dir,
-        TMPDIR: dir,
-        PATH: process.env.PATH,
-      },
-    });
+    const context = isolate.createContextSync();
+    const jail = context.global;
+
+    // Set up output capture callback
+    let output = "";
+    jail.setSync("__write", new ivm.Callback((str: string) => {
+      output += str;
+    }));
+
+    // Set up base64 callbacks (Buffer/atob/btoa polyfill)
+    jail.setSync("__atob", new ivm.Callback((str: string) => {
+      return Buffer.from(str, "base64").toString("binary");
+    }));
+    jail.setSync("__btoa", new ivm.Callback((str: string) => {
+      return Buffer.from(str, "binary").toString("base64");
+    }));
+
+    // Inject preamble (process shim, Buffer polyfill, etc.)
+    const preambleScript = isolate.compileScriptSync(ISOLATE_PREAMBLE);
+    preambleScript.runSync(context);
+
+    // Compile and run user code with timeout
+    const userScript = isolate.compileScriptSync(code);
+    userScript.runSync(context, { timeout: effectiveTimeout });
+
+    return output;
   } finally {
-    // R07: Use recursive removal — child may have created files in temp dir
-    try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore cleanup errors */ }
+    isolate.dispose();
   }
 }
