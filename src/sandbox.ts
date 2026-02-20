@@ -26,6 +26,15 @@ const MAX_TIMEOUT = 15000;
 /** Memory limit for the V8 isolate in megabytes */
 const MEMORY_LIMIT_MB = 128;
 
+/** Maximum output buffer size (10MB) — prevents host DoS via stdout spam */
+const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
+
+/** Maximum input size for atob/btoa callbacks (1MB) */
+const MAX_BASE64_INPUT = 1024 * 1024;
+
+/** Maximum input code size (10MB) */
+const MAX_CODE_SIZE = 10 * 1024 * 1024;
+
 /**
  * Preamble injected into the isolate to provide minimal API shims.
  * These are thin wrappers around callbacks injected from the host.
@@ -57,6 +66,10 @@ var Buffer = {
 `;
 
 export function executeSandboxed(code: string, timeout = 5000): string {
+  if (code.length > MAX_CODE_SIZE) {
+    throw new Error(`Input code exceeds ${MAX_CODE_SIZE} byte limit (${code.length} bytes)`);
+  }
+
   const effectiveTimeout = Math.min(timeout, MAX_TIMEOUT);
 
   const isolate = new ivm.Isolate({ memoryLimit: MEMORY_LIMIT_MB });
@@ -64,17 +77,29 @@ export function executeSandboxed(code: string, timeout = 5000): string {
     const context = isolate.createContextSync();
     const jail = context.global;
 
-    // Set up output capture callback
+    // Set up output capture callback with size cap
     let output = "";
+    let outputCapped = false;
     jail.setSync("__write", new ivm.Callback((str: string) => {
+      if (outputCapped) throw new Error("Output buffer limit exceeded");
+      if (output.length + str.length > MAX_OUTPUT_BYTES) {
+        outputCapped = true;
+        throw new Error("Output buffer limit exceeded");
+      }
       output += str;
     }));
 
-    // Set up base64 callbacks (Buffer/atob/btoa polyfill)
+    // Set up base64 callbacks with input size cap
     jail.setSync("__atob", new ivm.Callback((str: string) => {
+      if (str.length > MAX_BASE64_INPUT) {
+        throw new Error("Base64 input exceeds size limit");
+      }
       return Buffer.from(str, "base64").toString("binary");
     }));
     jail.setSync("__btoa", new ivm.Callback((str: string) => {
+      if (str.length > MAX_BASE64_INPUT) {
+        throw new Error("Base64 input exceeds size limit");
+      }
       return Buffer.from(str, "binary").toString("base64");
     }));
 

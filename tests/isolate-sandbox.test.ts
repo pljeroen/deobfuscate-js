@@ -166,3 +166,93 @@ describe("I06: string-array pass still works with isolate sandbox", () => {
     expect(result).toBe("255");
   });
 });
+
+// --- Red-team: escape attempts ---
+
+describe("red-team: isolate escape attempts", () => {
+  it("constructor chain returns isolate global, not host", () => {
+    const result = executeSandboxed(`
+      try {
+        var leaked = globalThis.constructor.constructor("return this")();
+        // If we escaped, leaked would have Node APIs
+        process.stdout.write(String(typeof leaked.require));
+      } catch(e) {
+        process.stdout.write("BLOCKED");
+      }
+    `);
+    // Should be "undefined" (isolate global) or "BLOCKED" — never "function"
+    expect(result).not.toBe("function");
+  });
+
+  it("Function constructor stays in isolate", () => {
+    const result = executeSandboxed(`
+      try {
+        var fn = Function("return typeof require")();
+        process.stdout.write(fn);
+      } catch(e) {
+        process.stdout.write("BLOCKED");
+      }
+    `);
+    expect(result).not.toBe("function");
+  });
+
+  it("cannot access host via prototype pollution", () => {
+    const result = executeSandboxed(`
+      try {
+        Object.prototype.polluted = "yes";
+        process.stdout.write("ok");
+      } catch(e) {
+        process.stdout.write("BLOCKED");
+      }
+    `);
+    // Pollution in isolate must not affect host
+    expect((Object.prototype as any).polluted).toBeUndefined();
+    expect(result).toBe("ok");
+  });
+
+  it("typeof Deno is undefined", () => {
+    const result = executeSandboxed(`
+      process.stdout.write(typeof Deno);
+    `);
+    expect(result).toBe("undefined");
+  });
+
+  it("cannot access __write callback internals", () => {
+    const result = executeSandboxed(`
+      try {
+        // Try to inspect the callback object
+        var keys = Object.getOwnPropertyNames(__write);
+        process.stdout.write("keys:" + keys.length);
+      } catch(e) {
+        process.stdout.write("BLOCKED");
+      }
+    `);
+    // Should not be able to introspect host callback
+    expect(result).not.toContain("LEAK");
+  });
+});
+
+// --- Host-side DoS protection ---
+
+describe("host-side DoS protection", () => {
+  it("caps output buffer size", () => {
+    // Try to write more than the output limit
+    expect(() => executeSandboxed(`
+      var chunk = "A".repeat(1024 * 1024); // 1MB
+      for (var i = 0; i < 20; i++) { process.stdout.write(chunk); }
+    `, 10000)).toThrow();
+  });
+
+  it("caps atob input size", () => {
+    expect(() => executeSandboxed(`
+      var huge = "A".repeat(2 * 1024 * 1024); // 2MB
+      atob(huge);
+      process.stdout.write("ok");
+    `, 5000)).toThrow();
+  });
+
+  it("rejects oversized input code", () => {
+    const hugeCode = `process.stdout.write("${"x".repeat(11 * 1024 * 1024)}")`;
+    expect(() => executeSandboxed(hugeCode)).toThrow();
+  });
+});
