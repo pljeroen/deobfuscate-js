@@ -1,6 +1,6 @@
 # deobfuscate-js
 
-![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-296%20passing-green) ![Node](https://img.shields.io/badge/node-18%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-379%20passing-green) ![Node](https://img.shields.io/badge/node-18%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
 
 JavaScript de-obfuscation toolkit. Reverses javascript-obfuscator/obfuscator.io transforms (string array encoding, control flow flattening, proxy function objects, anti-debug traps) and handles webpack/browserify bundles. Combines AST-based transforms with token-level formatting to produce readable output from obfuscated or minified JavaScript.
 
@@ -10,16 +10,19 @@ JavaScript de-obfuscation toolkit. Reverses javascript-obfuscator/obfuscator.io 
 npm install
 npm run deobfuscate                              # input/lodash.min.js -> output/lodash.deobfuscated.js
 npm run deobfuscate -- path/to/input.js out.js   # custom paths
+npm run deobfuscate -- --unsafe path/to/input.js  # enable string-array resolution (executes code)
 ```
+
+By default, only safe passes run. The `--unsafe` flag enables the string-array pass, which executes untrusted code in a V8 isolate sandbox.
 
 ## Architecture
 
 Two-phase pipeline: AST transforms followed by token-level formatting.
 
-- **AST phase**: Parse once with `@babel/parser`, apply N transform passes via `@babel/traverse`, generate once with `@babel/generator`. Supports iterative convergence — the full pass sequence repeats up to 3 times until the output stabilizes.
+- **AST phase**: Parse once with `@babel/parser`, apply N transform passes via `@babel/traverse`, generate once with `@babel/generator`. Supports iterative convergence -- the full pass sequence repeats up to 3 times until the output stabilizes.
 - **Token phase**: Tokenize the generated output, re-emit with proper indentation and whitespace.
 
-All passes implement the `ASTPass` or `TokenPass` interface (defined in `src/types.ts`). The pipeline runner is in `src/pipeline.ts`. Each pass can declare a `safety` level (`"safe"` or `"unsafe"`); `filterSafePasses()` strips unsafe passes for use cases where code execution is not acceptable.
+All passes implement the `ASTPass` or `TokenPass` interface (defined in `src/types.ts`). The pipeline runner is in `src/pipeline.ts`. Each pass can declare a `safety` level (`"safe"` or `"unsafe"`); `filterSafePasses()` strips unsafe passes by default.
 
 ## Pipeline
 
@@ -32,12 +35,12 @@ The 14 AST passes and 1 token pass run in the order below. Some passes appear tw
 | 3 | Constant Propagate | `constant-propagate.ts` | Inline variables assigned once to a literal, identifier alias, or constant array |
 | 4 | Dead Code Eliminate | `dead-code-eliminate.ts` | Remove `if(false)` blocks, unreachable statements, unused variables/functions |
 | 5 | Hex/Unicode Decode | `hex-decode.ts` | Decode `\xHH`, `\uHHHH`, `\u{HHHH}` escapes and hex numeric literals |
-| 6 | String Array | `string-array.ts` | Resolve string array obfuscation via process-isolated sandbox execution (unsafe) |
+| 6 | String Array | `string-array.ts` | Resolve string array obfuscation via V8 isolate sandbox execution (unsafe) |
 | 7 | Control Flow Object | `control-flow-object.ts` | Inline control flow storage objects (proxy functions, string literals) |
 | 8 | Control Flow Unflatten | `control-flow-unflatten.ts` | Reconstruct linear flow from `while(!![])/switch` dispatch pattern |
 | 9 | Anti-Debug | `anti-debug.ts` | Remove `.constructor("debugger")` traps, console overrides, self-defending guards |
-| 10 | Constant Propagate | `constant-propagate.ts` | Second pass — clean up constants exposed by passes 6-9 |
-| 11 | Dead Code Eliminate | `dead-code-eliminate.ts` | Second pass — remove dead code exposed by passes 6-10 |
+| 10 | Constant Propagate | `constant-propagate.ts` | Second pass -- clean up constants exposed by passes 6-9 |
+| 11 | Dead Code Eliminate | `dead-code-eliminate.ts` | Second pass -- remove dead code exposed by passes 6-10 |
 | 12 | AST Simplify | `ast-simplify.ts` | Split comma expressions into separate statements, computed to dot access |
 | 13 | Semantic Rename | `semantic-rename.ts` | Rename `_0x`-prefixed variables by usage context (loop counters, `.length`, error params) |
 | 14 | Scope-Aware Rename | `ast-rename.ts` | Rename remaining single/two-letter minified names via Babel scope analysis |
@@ -55,7 +58,7 @@ Detects and extracts individual modules from bundled JavaScript:
 - **Webpack 5** -- Arrow IIFE with `__webpack_modules__` object
 - **Browserify** -- 3-parameter IIFE with `[function, dependencies]` tuples
 
-Modules are extracted as named function declarations (`__module_0__`, `__module_1__`, etc.).
+Modules are extracted as named function declarations (`__module_0__`, `__module_1__`, etc.). Emits a metadata comment indicating bundle type and module count.
 
 #### Constant Fold
 
@@ -70,13 +73,13 @@ Evaluates static expressions at deobfuscation time:
 | `typeof "x"` | `"string"` |
 | `true && false` | `false` |
 
-Iterates internally until no more foldable expressions remain.
+Iterates internally until no more foldable expressions remain (capped at 25 iterations).
 
 #### Constant Propagate
 
 Inlines variables assigned exactly once to a constant value, where the binding is never reassigned. Also propagates:
 
-- Identifier aliases (`const alias = original` when `original` is also constant)
+- Identifier aliases (`const alias = original` when `original` is also constant) -- scope-safe: skips references where the target name is shadowed in an inner scope
 - Constant array element access (`const arr = ["a","b"]; arr[0]` -> `"a"`)
 
 #### Dead Code Eliminate
@@ -87,6 +90,8 @@ Four sub-passes in sequence:
 2. Remove unreachable statements after `return`/`throw`/`break`/`continue`
 3. Remove unused variable declarations (when initializer has no side effects, including IIFEs)
 4. Remove unreferenced nested function declarations
+
+The `isPure` check for identifiers is restricted to `undefined`, `NaN`, and `Infinity` to avoid removing declarations with potentially side-effecting initializers.
 
 #### Hex/Unicode Decode
 
@@ -100,9 +105,10 @@ Resolves javascript-obfuscator's string array obfuscation pattern:
 2. Detects optional rotation IIFE (shuffles array at load time)
 3. Detects decoder function(s) and wrapper functions (including function-scoped wrappers and variable aliases)
 4. Extracts offset objects used in call arguments
-5. Executes setup code in a **process-isolated sandbox** (`child_process.execFileSync` with timeout)
-6. Replaces all decoder/wrapper calls with resolved string literals
-7. Removes setup code (array, rotation IIFE, decoders, wrappers, aliases)
+5. Executes setup code in a **V8 isolate sandbox** (`isolated-vm`) with deterministic Date/Math.random
+6. Parses sandbox output using a delimiter protocol (robust against stray stdout)
+7. Replaces all decoder/wrapper calls with resolved string literals
+8. Removes setup code (array, rotation IIFE, decoders, wrappers, aliases)
 
 Supports rotation with offset, base64/RC4 encoding, self-overwriting decoders, scoped wrapper chains, and custom decoding logic. Marked `safety: "unsafe"` because it executes code.
 
@@ -115,7 +121,7 @@ Resolves javascript-obfuscator's control flow storage objects -- plain objects u
 - Call delegation: `obj.c = function(f, ...args) { return f(...args) }` -> inlines direct call
 - String literals: `obj.d = "hello"` -> inlines `"hello"` (including concatenation folding)
 
-Also handles the `transformObjectKeys` pattern (empty object declaration + sequential property assignments merged before inlining).
+Also handles the `transformObjectKeys` pattern (empty object declaration + sequential property assignments merged before inlining). Capped at 25 iterations.
 
 #### Control Flow Unflatten
 
@@ -139,18 +145,20 @@ b();
 c();
 ```
 
-Resolves the order array (pipe-delimited string or array literal), maps case labels to statement bodies, emits in resolved order, and removes dispatcher variables.
+Resolves the order array (pipe-delimited string or array literal), maps case labels to statement bodies, emits in resolved order, and removes dispatcher variables. Capped at 25 iterations.
 
 #### Anti-Debug Removal
 
 Detects and removes obfuscator.io anti-debug patterns:
 
 - Functions containing `.constructor("debugger")` or `.constructor("while (true) {}")`
-- Console-override IIFEs that replace `console.log`/`warn`/etc with no-ops
+- Console-override IIFEs that replace `console.log`/`warn`/etc with no-ops (requires both method-name array and `console[x] = ...` assignment)
 - Self-defending guards that check `Function.prototype.toString()` with `(((.+)+)+)+$` regex
 - `setInterval` calls that invoke anti-debug functions
 - Anti-tamper IIFEs referencing removed functions
 - Dead `_0x`-named function/variable declarations after removal
+
+Convergence loops capped at 10 iterations.
 
 #### AST Simplify
 
@@ -190,6 +198,19 @@ Re-emits the token stream with proper indentation and whitespace:
 
 ## Additional Features
 
+### V8 Isolate Sandbox
+
+The string array pass executes untrusted code in a **V8 isolate** (`src/sandbox.ts`) via `isolated-vm`:
+
+- **Separate V8 heap** with 128MB memory limit (engine-enforced)
+- **Wall-clock timeout** via V8 TerminateExecution (engine-enforced, 15s max)
+- **No Node.js APIs** -- no require, fs, net, child_process; only 3 host-bridged callbacks
+- **Deterministic** -- Date.now() frozen to constant, Math.random() seeded xorshift32 PRNG
+- **DoS protected** -- output buffer 10MB cap, base64 input 1MB cap, input code 10MB cap
+- **Version pinned** -- `isolated-vm` pinned to exact release (native C++ addon)
+
+Host bridge: `__write(str)` for stdout capture, `__atob(str)` / `__btoa(str)` for base64. All callbacks are string-in/string-out with size caps.
+
 ### Obfuscator Fingerprinting
 
 Analyzes an AST (`src/fingerprint.ts`) to identify the obfuscation tool used. Currently detects javascript-obfuscator by three patterns:
@@ -209,9 +230,11 @@ The parser (`src/parser.ts`) handles malformed JavaScript gracefully through a f
 3. Truncate to the valid prefix before the error line
 4. Return empty program as last resort
 
-### Process-Isolated Sandbox
+Also provides `parseWithDiagnostics()` returning `{ ast, warnings }` for truncation visibility.
 
-The string array pass executes untrusted code in a child Node.js process (`src/sandbox.ts`) for OS-level isolation: separate address space, enforced timeout via SIGTERM. Timeout scales with setup code size and number of calls.
+### Structured Pipeline Output
+
+`runPipelineWithReport()` returns `{ code, warnings, report }` with per-pass changed flags, alongside the original `runPipeline()` for backward compatibility.
 
 ## Results
 
@@ -243,7 +266,7 @@ Both tools produce syntactically valid output on all samples. Losses are minor (
 ## Testing
 
 ```bash
-npm test           # run all tests (296)
+npm test           # run all tests (379)
 npm run test:watch # watch mode
 ```
 
