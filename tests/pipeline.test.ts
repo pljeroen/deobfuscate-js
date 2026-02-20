@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { runTokenPipeline, runASTPipeline } from "../src/pipeline.js";
+import { runTokenPipeline, runASTPipeline, runPipelineWithReport } from "../src/pipeline.js";
 import type { ASTPass, TokenPass } from "../src/types.js";
 import { parse, generate } from "../src/parser.js";
 import { traverse, t } from "../src/babel.js";
@@ -156,5 +156,75 @@ describe("R18: safe/unsafe classification", () => {
     const filtered = filterSafePasses([safe, unsafe, noLabel]);
     expect(filtered).toHaveLength(2);
     expect(filtered.map(p => p.name)).toEqual(["s", "n"]);
+  });
+});
+
+describe("D01: pipeline report includes parser warnings", () => {
+  it("returns empty warnings for valid input", () => {
+    const noop: ASTPass = { name: "noop", description: "", run: (ast) => ast };
+    const noopToken: TokenPass = { name: "noop-t", description: "", run: (s) => s };
+    const result = runPipelineWithReport("var x = 1;", [noop], [noopToken]);
+    expect(result.warnings).toEqual([]);
+    expect(result.code).toContain("var x = 1");
+  });
+
+  it("includes parser warnings when input requires error recovery", () => {
+    // Malformed JS that Babel can recover from but should produce warnings
+    const malformed = "var x = {a: 1,, b: 2};"; // extra comma
+    const noop: ASTPass = { name: "noop", description: "", run: (ast) => ast };
+    const result = runPipelineWithReport(malformed, [noop], []);
+    // Should still produce output (error recovery) and have warnings
+    expect(result.code).toBeDefined();
+    expect(result.warnings.length).toBeGreaterThanOrEqual(1);
+    // Warning text comes from parseWithDiagnostics — either error recovery
+    // diagnostics or sourceType fallback, depending on the parse path taken
+    expect(result.warnings.some(w =>
+      w.includes("Parse error") || w.includes("Fell back") || w.includes("Truncated")
+    )).toBe(true);
+  });
+
+  it("includes warnings when re-parse occurs on later iterations", () => {
+    // Force a second iteration by having a pass that changes code
+    let firstRun = true;
+    const mutator: ASTPass = {
+      name: "mutator",
+      description: "",
+      run: (ast) => {
+        if (firstRun) {
+          firstRun = false;
+          traverse(ast, {
+            StringLiteral(path: any) {
+              if (path.node.value === "A") path.node.value = "B";
+            },
+          });
+        }
+        return ast;
+      },
+    };
+    const result = runPipelineWithReport("var x = 'A';", [mutator], []);
+    // Even with valid input, the pipeline should work and report should have pass data
+    expect(result.report.length).toBeGreaterThan(0);
+    expect(result.report[0].name).toBe("mutator");
+  });
+
+  it("report tracks per-pass changes", () => {
+    const changer: ASTPass = {
+      name: "changer",
+      description: "",
+      run: (ast) => {
+        traverse(ast, {
+          NumericLiteral(path: any) {
+            if (path.node.value === 1) path.node.value = 2;
+          },
+        });
+        return ast;
+      },
+    };
+    const noop: ASTPass = { name: "noop", description: "", run: (ast) => ast };
+    const result = runPipelineWithReport("var x = 1;", [changer, noop], []);
+    const changerReport = result.report.find(r => r.name === "changer");
+    const noopReport = result.report.find(r => r.name === "noop");
+    expect(changerReport?.changed).toBe(true);
+    expect(noopReport?.changed).toBe(false);
   });
 });

@@ -7,7 +7,7 @@
  */
 
 import type { ASTPass, TokenPass } from "./types.js";
-import { parse, generate } from "./parser.js";
+import { parse, parseWithDiagnostics, generate } from "./parser.js";
 
 export interface ASTPipelineOptions {
   maxIterations?: number;
@@ -91,7 +91,8 @@ export function runPipelineWithReport(
 
   const maxIterations = 3;
   let currentSource = source;
-  let ast = parse(currentSource);
+  let { ast, warnings: parseWarnings } = parseWithDiagnostics(currentSource);
+  warnings.push(...parseWarnings);
   let previousCode = "";
 
   for (let i = 0; i < maxIterations; i++) {
@@ -109,7 +110,9 @@ export function runPipelineWithReport(
     previousCode = currentCode;
     if (i < maxIterations - 1) {
       currentSource = currentCode;
-      ast = parse(currentSource);
+      const reparse = parseWithDiagnostics(currentSource);
+      ast = reparse.ast;
+      warnings.push(...reparse.warnings);
     }
   }
 

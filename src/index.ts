@@ -5,7 +5,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { runPipeline, filterSafePasses } from "./pipeline.js";
+import { runPipelineWithReport, filterSafePasses } from "./pipeline.js";
 import type { ASTPass } from "./types.js";
 import { constantFoldPass } from "./passes/constant-fold.js";
 import { constantPropagatePass } from "./passes/constant-propagate.js";
@@ -23,6 +23,7 @@ import { formatPass } from "./passes/format.js";
 
 const args = process.argv.slice(2);
 const unsafeMode = args.includes("--unsafe");
+const verboseMode = args.includes("--verbose");
 const positionalArgs = args.filter(a => !a.startsWith("--"));
 
 const inputPath = positionalArgs[0] ?? resolve("input/lodash.min.js");
@@ -38,10 +39,21 @@ if (unsafeMode) {
 
 const source = readFileSync(inputPath, "utf-8");
 
-const result = runPipeline(source, astPasses, [formatPass]);
+const { code, warnings, report } = runPipelineWithReport(source, astPasses, [formatPass]);
 
-writeFileSync(outputPath, result, "utf-8");
+writeFileSync(outputPath, code, "utf-8");
+
+for (const warning of warnings) {
+  process.stderr.write(`WARNING: ${warning}\n`);
+}
+
+if (verboseMode) {
+  process.stderr.write("\nPass report:\n");
+  for (const entry of report) {
+    process.stderr.write(`  ${entry.name}: ${entry.changed ? "changed" : "no change"}\n`);
+  }
+}
 
 const inputSize = Buffer.byteLength(source);
-const outputSize = Buffer.byteLength(result);
+const outputSize = Buffer.byteLength(code);
 console.log(`Done: ${inputPath} (${inputSize} bytes) → ${outputPath} (${outputSize} bytes)`);
