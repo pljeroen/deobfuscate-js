@@ -6,3 +6,4 @@ output/
 CLAUDE.md
 SESSION_HANDOFF*.md
 .hypothesis/
+benchmarks/
