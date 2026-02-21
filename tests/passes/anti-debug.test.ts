@@ -97,6 +97,43 @@ describe("anti-debug removal", () => {
       expect(result).toContain("keep");
     });
 
+    it("removes unreferenced a0_0x-prefixed variables", () => {
+      const result = ad(`
+        function a0_0xdebug(x) {
+          (function(){}).constructor("debugger").apply("stateObject");
+        }
+        a0_0xdebug(0);
+        console.log("keep");
+      `);
+      expect(result).not.toContain("a0_0xdebug");
+      expect(result).toContain("keep");
+    });
+
+    it("removes unreferenced a0_0x factory IIFE after guard removal", () => {
+      const result = ad(`
+        const a0_0x54b02b = function() {
+          let firstCall = true;
+          return function(context, fn) {
+            const rfn = firstCall ? function() {
+              if (fn) { const res = fn.apply(context, arguments); fn = null; return res; }
+            } : function() {};
+            firstCall = false;
+            return rfn;
+          };
+        }();
+        var a0_0x16b712 = a0_0x54b02b(this, function() {
+          return a0_0x16b712.toString().search("(((.+)+)+)+$")
+            .toString().constructor(a0_0x16b712).search("(((.+)+)+)+$");
+        });
+        a0_0x16b712();
+        console.log("keep");
+      `);
+      expect(result).not.toContain("a0_0x54b02b");
+      expect(result).not.toContain("a0_0x16b712");
+      expect(result).not.toContain("firstCall");
+      expect(result).toContain("keep");
+    });
+
     it("preserves non-obfuscated unreferenced functions", () => {
       const result = ad(`
         function myHelper() { return 42; }

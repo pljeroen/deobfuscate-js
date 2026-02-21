@@ -80,4 +80,78 @@ describe("AST simplify pass", () => {
       expect(result).toContain("arr[0]");
     });
   });
+
+  describe("logical expression to if-statement", () => {
+    it("converts a && b() to if (a) b()", () => {
+      const result = simplify("a && b();");
+      expect(result).toContain("if (a)");
+      expect(result).toContain("b()");
+      expect(result).not.toContain("&&");
+    });
+
+    it("converts a || b() to if (!a) b()", () => {
+      const result = simplify("a || b();");
+      expect(result).toContain("if (!a)");
+      expect(result).toContain("b()");
+      expect(result).not.toContain("||");
+    });
+
+    it("does not convert logical in non-statement context", () => {
+      const result = simplify("var x = a && b();");
+      expect(result).toContain("&&");
+    });
+  });
+
+  describe("ternary to if-statement", () => {
+    it("converts a ? b() : c() to if/else", () => {
+      const result = simplify("a ? b() : c();");
+      expect(result).toContain("if (a)");
+      expect(result).toContain("b()");
+      expect(result).toContain("else");
+      expect(result).toContain("c()");
+    });
+
+    it("does not convert ternary in non-statement context", () => {
+      const result = simplify("var x = a ? b() : c();");
+      expect(result).toContain("?");
+    });
+  });
+
+  describe("merge else-if", () => {
+    it("merges else { if } into else if", () => {
+      const result = simplify("if (a) { x(); } else { if (b) { y(); } }");
+      expect(result).toContain("else if (b)");
+    });
+  });
+
+  describe("yoda condition flipping", () => {
+    it("flips literal === variable", () => {
+      const result = simplify('if ("string" === x) {}');
+      expect(result).toContain('x === "string"');
+    });
+
+    it("flips literal !== variable", () => {
+      const result = simplify("if (0 !== x) {}");
+      expect(result).toContain("x !== 0");
+    });
+
+    it("does not flip variable === variable", () => {
+      const result = simplify("if (a === b) {}");
+      expect(result).toContain("a === b");
+    });
+  });
+
+  describe("empty block cleanup", () => {
+    it("removes empty else block", () => {
+      const result = simplify("if (a) { b(); } else {}");
+      expect(result).not.toContain("else");
+    });
+
+    it("inverts if with empty consequent and non-empty alternate", () => {
+      const result = simplify("if (a) {} else { b(); }");
+      expect(result).toContain("if (!a)");
+      expect(result).toContain("b()");
+      expect(result).not.toContain("else");
+    });
+  });
 });

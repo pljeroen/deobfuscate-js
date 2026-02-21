@@ -368,7 +368,7 @@ function nodeReferencesAny(node: t.Node, names: Set<string>): boolean {
 }
 
 function isObfuscatedName(name: string): boolean {
-  return /^_0x[0-9a-f]+$/i.test(name);
+  return /_0x[0-9a-f]+$/i.test(name);
 }
 
 /** Check if a member expression property matches a name (handles both .prop and ["prop"]) */

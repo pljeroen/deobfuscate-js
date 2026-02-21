@@ -38,6 +38,36 @@ describe("string array resolution", () => {
       `);
       expect(result).toContain("_0x4e2c");
     });
+
+    it("resolves single-element string arrays", () => {
+      const result = deobfuscate(`
+        function _0x1258() {
+          var _0x4e = ['log'];
+          _0x1258 = function() { return _0x4e; };
+          return _0x1258();
+        }
+        function _0x6b1a(idx) {
+          idx = idx - 0;
+          var arr = _0x1258();
+          return arr[idx];
+        }
+        console[_0x6b1a(0)](42);
+      `);
+      expect(result).toContain('"log"');
+      expect(result).not.toContain("_0x1258");
+      expect(result).not.toContain("_0x6b1a");
+    });
+
+    it("resolves two-element string arrays", () => {
+      const result = deobfuscate(`
+        var _0x4e2c = ['log', 'Hello'];
+        function _0xdec(idx) { return _0x4e2c[idx]; }
+        console[_0xdec(0)](_0xdec(1));
+      `);
+      expect(result).toContain('"log"');
+      expect(result).toContain('"Hello"');
+      expect(result).not.toContain("_0x4e2c");
+    });
   });
 
   describe("R10: rotation resolution", () => {
@@ -457,6 +487,22 @@ describe("string array resolution", () => {
       expect(result).toContain('"world"');
       expect(result).not.toContain("_0x5246");
       expect(result).not.toContain("_0xdec");
+    });
+
+    it("resolves aliases inside arrow function callbacks", () => {
+      const result = deobfuscate(`
+        var _0x4e2c = ['log', 'Hello', 'world', 'foo', 'bar'];
+        function _0xdec(idx) { return _0x4e2c[idx]; }
+        var arr = [1, 2, 3];
+        arr.forEach(x => {
+          var _0xalias = _0xdec;
+          console[_0xalias(0)](_0xalias(1));
+        });
+      `);
+      expect(result).toContain('"log"');
+      expect(result).toContain('"Hello"');
+      expect(result).not.toContain("_0xalias");
+      expect(result).not.toContain("_0x4e2c");
     });
 
     it("does not match user function that mentions decoder in non-call context", () => {

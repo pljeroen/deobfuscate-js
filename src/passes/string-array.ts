@@ -116,7 +116,7 @@ function detectPattern(ast: File, source?: string): StringArrayPattern | null {
     if (t.isVariableDeclaration(stmt)) {
       for (const decl of stmt.declarations) {
         if (t.isIdentifier(decl.id) && t.isArrayExpression(decl.init) &&
-            isAllStringLiterals(decl.init) && decl.init.elements.length >= 3) {
+            isAllStringLiterals(decl.init) && decl.init.elements.length >= 1) {
           arrayName = decl.id.name;
           arrayIdx = i;
           break;
@@ -277,7 +277,8 @@ function detectPattern(ast: File, source?: string): StringArrayPattern | null {
       // The original declaration will be included in setupCode via removeIndices,
       // so do NOT also add to aliasDefs (would cause duplicate declaration error).
       const parentFn = path.findParent(
-        p => t.isFunctionDeclaration(p.node) || t.isFunctionExpression(p.node),
+        p => t.isFunctionDeclaration(p.node) || t.isFunctionExpression(p.node) ||
+             t.isArrowFunctionExpression(p.node),
       );
       if (!parentFn) {
         const declStmt = path.parentPath;
@@ -462,9 +463,14 @@ function removeAliasDeclarations(ast: File, pattern: StringArrayPattern): void {
       if (!pattern.calleeNames.has(aliasName)) return;
       if (!decoderAndWrapperNames.has(targetName) && !pattern.calleeNames.has(targetName)) return;
 
-      // Check if the alias is still referenced
-      const binding = path.scope.getBinding(aliasName);
-      if (binding && binding.referencePaths.length > 0) return;
+      // Top-level aliases are cleaned up by removeSetupStatements (tracked in removeIndices).
+      // Function-scoped aliases (inside any function or arrow function) can be safely removed
+      // since all their calls have been inlined.
+      const enclosingFn = path.findParent(
+        p => t.isFunctionDeclaration(p.node) || t.isFunctionExpression(p.node) ||
+             t.isArrowFunctionExpression(p.node),
+      );
+      if (!enclosingFn) return; // top-level — handled by removeSetupStatements
 
       path.remove();
     },
@@ -538,7 +544,7 @@ function isSelfOverwritingArrayFn(stmt: t.FunctionDeclaration): boolean {
     if (t.isVariableDeclaration(s)) {
       for (const d of s.declarations) {
         if (t.isArrayExpression(d.init) && isAllStringLiterals(d.init) &&
-            d.init.elements.length >= 3) {
+            d.init.elements.length >= 1) {
           hasStringArray = true;
         }
       }
