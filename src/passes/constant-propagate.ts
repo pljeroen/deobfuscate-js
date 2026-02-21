@@ -69,7 +69,9 @@ export const constantPropagatePass: ASTPass = {
             const memberPath = ref.parentPath;
             if (!memberPath?.isMemberExpression() || memberPath.node.object !== ref.node) return false;
             const assignPath = memberPath.parentPath;
-            return assignPath?.isAssignmentExpression() && assignPath.node.left === memberPath.node;
+            if (assignPath?.isAssignmentExpression() && assignPath.node.left === memberPath.node) return true;
+            if (assignPath?.isUpdateExpression()) return true;
+            return false;
           });
           if (hasMutation) return;
 

@@ -255,6 +255,8 @@ function detectPattern(ast: File, source?: string): StringArrayPattern | null {
 
   // Step 3c: Find variable aliases — `var x = decoder` creates a local alias for calls
   // (obfuscator.io "calls transform" aliases decoders inside user functions)
+  // Handles both function-scoped AND top-level aliases. Top-level alias declarations
+  // are tracked for removal alongside the array/decoder setup.
   // Skip aliases inside setup statements.
   const aliasDefs: string[] = [];
 
@@ -265,18 +267,26 @@ function detectPattern(ast: File, source?: string): StringArrayPattern | null {
       const targetName = path.node.init.name;
       if (calleeNames.has(aliasName) || !calleeNames.has(targetName)) return;
 
-      // Must be inside a function (top-level aliases are handled by the main flow)
-      const parentFn = path.findParent(
-        p => t.isFunctionDeclaration(p.node) || t.isFunctionExpression(p.node),
-      );
-      if (!parentFn) return;
-
       // Skip aliases inside setup statements
       const topStmt = path.findParent(p => p.parentPath?.node === ast.program);
       if (topStmt && setupStmtNodes.has(topStmt.node as t.Statement)) return;
 
       calleeNames.add(aliasName);
       aliasDefs.push(`var ${aliasName} = ${targetName};`);
+
+      // For top-level aliases, track their statement index for removal
+      const parentFn = path.findParent(
+        p => t.isFunctionDeclaration(p.node) || t.isFunctionExpression(p.node),
+      );
+      if (!parentFn) {
+        const declStmt = path.parentPath;
+        if (declStmt && t.isVariableDeclaration(declStmt.node)) {
+          const idx = body.indexOf(declStmt.node);
+          if (idx !== -1 && !removeIndices.includes(idx)) {
+            removeIndices.push(idx);
+          }
+        }
+      }
     },
   });
 
@@ -444,14 +454,9 @@ function removeAliasDeclarations(ast: File, pattern: StringArrayPattern): void {
       const aliasName = path.node.id.name;
       const targetName = path.node.init.name;
 
-      // Only remove aliases of known decoders/wrappers
-      if (!pattern.calleeNames.has(aliasName) || !decoderAndWrapperNames.has(targetName)) return;
-
-      // Must be inside a function (not top-level)
-      const parentFn = path.findParent(
-        p => t.isFunctionDeclaration(p.node) || t.isFunctionExpression(p.node),
-      );
-      if (!parentFn) return;
+      // Only remove aliases of known decoders/wrappers/callees
+      if (!pattern.calleeNames.has(aliasName)) return;
+      if (!decoderAndWrapperNames.has(targetName) && !pattern.calleeNames.has(targetName)) return;
 
       // Check if the alias is still referenced
       const binding = path.scope.getBinding(aliasName);
@@ -509,10 +514,13 @@ function isWrapperFunction(stmt: t.Statement, decoderName: string): boolean {
   if (params.length < 1) return false;
   if (fnBody.body.length > 3) return false;
 
-  // Body must contain a call to decoderName
-  const code = generateNode(fnBody as any).code;
-  const re = new RegExp(`\\b${escapeRegExp(decoderName)}\\b`);
-  return re.test(code);
+  // Body must contain a ReturnStatement whose argument is a CallExpression
+  // calling the decoder (not just a string mention of the decoder name)
+  return fnBody.body.some(s => {
+    if (!t.isReturnStatement(s) || !t.isCallExpression(s.argument)) return false;
+    const callee = s.argument.callee;
+    return t.isIdentifier(callee) && callee.name === decoderName;
+  });
 }
 
 function isSelfOverwritingArrayFn(stmt: t.FunctionDeclaration): boolean {

@@ -8,10 +8,15 @@ function rename(code: string): string {
   return generate(result);
 }
 
+// Helper: wrap code with _0x marker to trigger the obfuscation gate
+function obf(code: string): string {
+  return `var _0x1234 = 1; ${code}`;
+}
+
 describe("AST rename pass", () => {
   describe("function parameters", () => {
     it("renames single-letter params to descriptive names", () => {
-      const result = rename("function f(n, t) { return n + t; }");
+      const result = rename(obf("function f(n, t) { return n + t; }"));
       expect(result).not.toContain("(n,");
       expect(result).not.toContain("(n ");
       // Should use descriptive names
@@ -19,19 +24,19 @@ describe("AST rename pass", () => {
     });
 
     it("preserves conventional names (i, j, k)", () => {
-      const result = rename("function f(i, j) { return i + j; }");
+      const result = rename(obf("function f(i, j) { return i + j; }"));
       expect(result).toContain("(i,");
       expect(result).toContain("j)");
     });
 
     it("preserves $ and _ names", () => {
-      const result = rename("function f($, _) { return $ + _; }");
+      const result = rename(obf("function f($, _) { return $ + _; }"));
       expect(result).toContain("$");
       expect(result).toContain("_");
     });
 
     it("does not rename long names", () => {
-      const result = rename("function f(name, value) { return name + value; }");
+      const result = rename(obf("function f(name, value) { return name + value; }"));
       expect(result).toContain("name");
       expect(result).toContain("value");
     });
@@ -39,12 +44,12 @@ describe("AST rename pass", () => {
 
   describe("local variables", () => {
     it("renames single-letter var declarations", () => {
-      const result = rename("function f() { var n = 1; return n; }");
+      const result = rename(obf("function f() { var n = 1; return n; }"));
       expect(result).not.toMatch(/var n\b/);
     });
 
     it("renames single-letter let/const", () => {
-      const result = rename("function f() { const n = 1; let t = 2; return n + t; }");
+      const result = rename(obf("function f() { const n = 1; let t = 2; return n + t; }"));
       expect(result).not.toMatch(/const n\b/);
       expect(result).not.toMatch(/let t\b/);
     });
@@ -52,13 +57,13 @@ describe("AST rename pass", () => {
 
   describe("scope isolation", () => {
     it("renames independently per function", () => {
-      const result = rename("function f(n) { return n; } function g(n) { return n; }");
+      const result = rename(obf("function f(n) { return n; } function g(n) { return n; }"));
       // Both functions' n should be renamed (possibly to same or different names)
       expect(result).not.toMatch(/\(n\)/);
     });
 
     it("handles nested scopes", () => {
-      const result = rename("function f(n) { function g(t) { return t; } return n; }");
+      const result = rename(obf("function f(n) { function g(t) { return t; } return n; }"));
       expect(result).not.toMatch(/\(n\)/);
       expect(result).not.toMatch(/\(t\)/);
     });
@@ -66,32 +71,64 @@ describe("AST rename pass", () => {
 
   describe("preserves structure", () => {
     it("does not rename property access", () => {
-      const result = rename("function f(n) { return n.x; }");
+      const result = rename(obf("function f(n) { return n.x; }"));
       expect(result).toContain(".x");
     });
 
     it("does not rename object keys", () => {
-      const result = rename("function f(n) { return {a: n}; }");
+      const result = rename(obf("function f(n) { return {a: n}; }"));
       expect(result).toContain("a:");
     });
 
     it("does not rename globals", () => {
-      const result = rename("function f() { return Math.max(1, 2); }");
+      const result = rename(obf("function f() { return Math.max(1, 2); }"));
       expect(result).toContain("Math");
     });
   });
 
   describe("arrow functions", () => {
     it("renames arrow function params", () => {
-      const result = rename("const f = (n, t) => n + t;");
+      const result = rename(obf("const f = (n, t) => n + t;"));
       expect(result).not.toMatch(/\(n,/);
     });
   });
 
   describe("two-letter variables", () => {
     it("renames two-letter minified names", () => {
-      const result = rename("function f(nn, tt) { return nn + tt; }");
+      const result = rename(obf("function f(nn, tt) { return nn + tt; }"));
       expect(result).not.toMatch(/\(nn,/);
+    });
+  });
+
+  describe("obfuscation gating", () => {
+    it("skips rename when no _0x identifiers exist", () => {
+      const result = rename("function f(s, a, b) { return s + a + b; }");
+      expect(result).toContain("(s,");
+      expect(result).toContain("a,");
+      expect(result).toContain("b)");
+    });
+
+    it("renames when _0x identifiers are present", () => {
+      const result = rename("var _0x1234 = 1; function f(n, t) { return n + t + _0x1234; }");
+      expect(result).not.toMatch(/\(n,/);
+    });
+
+    it("preserves correct short names in non-obfuscated code", () => {
+      const code = "function add(a, b) { var r = a + b; return r; }";
+      const result = rename(code);
+      expect(result).toContain("a,");
+      expect(result).toContain("b)");
+      expect(result).toContain("var r");
+    });
+  });
+
+  describe("undeclared global collision", () => {
+    it("does not rename to a name that collides with undeclared reference", () => {
+      // 'value' is used as undeclared global, so should not be used as a rename target
+      const result = rename("var _0x1234 = 1; function f(n) { return n + value; }");
+      // n should be renamed but NOT to 'value'
+      expect(result).not.toMatch(/\(value\)/);
+      expect(result).toContain("value");
     });
   });
 });

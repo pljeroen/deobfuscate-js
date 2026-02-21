@@ -180,6 +180,72 @@ describe("string array resolution", () => {
     });
   });
 
+  describe("top-level aliases", () => {
+    it("resolves top-level alias of decoder function", () => {
+      const result = deobfuscate(`
+        var _0x4e2c = ['log', 'Hello', 'world', 'foo', 'bar'];
+        function _0xdec(idx) { return _0x4e2c[idx]; }
+        var _0xalias = _0xdec;
+        console[_0xalias(0)](_0xalias(1));
+      `);
+      expect(result).toContain('"log"');
+      expect(result).toContain('"Hello"');
+      expect(result).not.toContain("_0xalias");
+      expect(result).not.toContain("_0xdec");
+    });
+
+    it("resolves multiple chained top-level aliases", () => {
+      const result = deobfuscate(`
+        var _0x4e2c = ['log', 'Hello', 'world', 'foo', 'bar'];
+        function _0xdec(idx) { return _0x4e2c[idx]; }
+        var _0xalias1 = _0xdec;
+        var _0xalias2 = _0xdec;
+        console[_0xalias1(0)](_0xalias2(1));
+      `);
+      expect(result).toContain('"log"');
+      expect(result).toContain('"Hello"');
+      expect(result).not.toContain("_0xalias1");
+      expect(result).not.toContain("_0xalias2");
+    });
+
+    it("removes top-level alias declaration after resolution", () => {
+      const result = deobfuscate(`
+        var _0x4e2c = ['log', 'Hello', 'world', 'foo', 'bar'];
+        function _0xdec(idx) { return _0x4e2c[idx]; }
+        var _0xalias = _0xdec;
+        console[_0xalias(0)](_0xalias(1));
+      `);
+      expect(result).not.toContain("_0xalias");
+      expect(result).not.toContain("_0x4e2c");
+    });
+
+    it("resolves top-level alias with rotation", () => {
+      const result = deobfuscate(`
+        var _0x4e2c = ['world', 'foo', 'bar', 'log', 'Hello'];
+        (function(arr, n) { while(n--) { arr.push(arr.shift()); } })(_0x4e2c, 3);
+        function _0xdec(idx) { return _0x4e2c[idx]; }
+        var _0xalias = _0xdec;
+        console[_0xalias(0)](_0xalias(1));
+      `);
+      expect(result).toContain('"log"');
+      expect(result).toContain('"Hello"');
+      expect(result).not.toContain("_0xalias");
+    });
+
+    it("does not break existing function-scoped alias resolution", () => {
+      const result = deobfuscate(`
+        var _0x4e2c = ['log', 'Hello', 'world', 'foo', 'bar'];
+        function _0xdec(idx) { return _0x4e2c[idx]; }
+        function user() {
+          var _0xlocal = _0xdec;
+          console[_0xlocal(0)](_0xlocal(1));
+        }
+      `);
+      expect(result).toContain('"log"');
+      expect(result).toContain('"Hello"');
+    });
+  });
+
   describe("safety", () => {
     it("does not modify normal code without string array pattern", () => {
       const code = `
@@ -349,6 +415,20 @@ describe("string array resolution", () => {
       expect(result).toContain('"world"');
       expect(result).not.toContain("_0x5246");
       expect(result).not.toContain("_0xdec");
+    });
+
+    it("does not match user function that mentions decoder in non-call context", () => {
+      // This function references the decoder name in a string, but doesn't forward-call it
+      const result = deobfuscate(`
+        var _0x4e2c = ['log', 'Hello', 'world', 'foo', 'bar'];
+        function _0xdec(idx) { return _0x4e2c[idx]; }
+        function userFn(a, b) { var name = "_0xdec"; return a + b; }
+        console[_0xdec(0)](_0xdec(1));
+        userFn(1, 2);
+      `);
+      expect(result).toContain('"log"');
+      // userFn should NOT be removed — it's a user function, not a wrapper
+      expect(result).toContain("userFn");
     });
 
     it("removes wrapper functions and setup after resolution", () => {

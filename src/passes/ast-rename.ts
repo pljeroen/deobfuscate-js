@@ -51,10 +51,32 @@ export const astRenamePass: ASTPass = {
   description: "Rename single-letter variables using Babel scope analysis",
 
   run(ast: File): File {
+    // Gate: only rename if obfuscated identifiers (_0x prefix) are present
+    let hasObfuscated = false;
+    traverse(ast, {
+      Identifier(path) {
+        if (path.node.name.startsWith("_0x")) {
+          hasObfuscated = true;
+          path.stop();
+        }
+      },
+    });
+    if (!hasObfuscated) return ast;
+
     traverse(ast, {
       "FunctionDeclaration|FunctionExpression|ArrowFunctionExpression"(path) {
         const scope = path.scope;
         let nameIdx = 0;
+
+        // Collect unbound references in this scope to avoid collisions
+        const unboundNames = new Set<string>();
+        path.traverse({
+          Identifier(idPath) {
+            if (idPath.isReferencedIdentifier() && !idPath.scope.hasBinding(idPath.node.name)) {
+              unboundNames.add(idPath.node.name);
+            }
+          },
+        });
 
         // Collect all bindings in this scope that need renaming
         const bindings = scope.bindings;
@@ -69,7 +91,7 @@ export const astRenamePass: ASTPass = {
               ? DESCRIPTIVE_NAMES[nameIdx]
               : `var${nameIdx - DESCRIPTIVE_NAMES.length + 1}`;
             nameIdx++;
-          } while (scope.hasBinding(newName) || GLOBALS.has(newName));
+          } while (scope.hasBinding(newName) || GLOBALS.has(newName) || unboundNames.has(newName));
 
           // Use Babel's scope.rename for safe, correct renaming
           scope.rename(name, newName);

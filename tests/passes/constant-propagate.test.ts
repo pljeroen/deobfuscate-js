@@ -60,6 +60,31 @@ describe("constant propagation", () => {
     });
   });
 
+  describe("array mutation detection", () => {
+    it("does not propagate array with element update expression (postfix)", () => {
+      const result = propagate("const a = [1, 2, 3]; a[0]++; console.log(a[0]);");
+      expect(result).toContain("a[0]");
+      expect(result).not.toContain("console.log(1)");
+    });
+
+    it("does not propagate array with element update expression (prefix)", () => {
+      const result = propagate("const a = [1, 2, 3]; --a[1]; console.log(a[1]);");
+      expect(result).toContain("a[1]");
+      expect(result).not.toContain("console.log(2)");
+    });
+
+    it("does not propagate array with element assignment", () => {
+      const result = propagate("const a = [1, 2]; a[0] = 9; console.log(a[0]);");
+      expect(result).toContain("a[0]");
+    });
+
+    it("propagates array without any mutations", () => {
+      const result = propagate("const a = [10, 20]; console.log(a[0]); console.log(a[1]);");
+      expect(result).toContain("console.log(10)");
+      expect(result).toContain("console.log(20)");
+    });
+  });
+
   describe("scope awareness", () => {
     it("propagates within function scope", () => {
       const result = propagate("function f() { const x = 1; return x; }");
