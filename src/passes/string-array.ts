@@ -218,8 +218,8 @@ function detectPattern(ast: File, source?: string): StringArrayPattern | null {
         const topStmt = path.findParent(p => p.parentPath?.node === ast.program);
         if (topStmt && setupStmtNodes.has(topStmt.node as t.Statement)) return;
 
-        // Must match wrapper pattern: ≥2 params, short body
-        if (node.params.length < 2) return;
+        // Must match wrapper pattern: ≥1 param, short body
+        if (node.params.length < 1) return;
         if (node.body.body.length > 3) return;
 
         // Body must call a known callee (decoder, top-level wrapper, or already-detected scoped wrapper)
@@ -506,7 +506,7 @@ function isWrapperFunction(stmt: t.Statement, decoderName: string): boolean {
   }
 
   if (!params || !fnBody) return false;
-  if (params.length < 2) return false;
+  if (params.length < 1) return false;
   if (fnBody.body.length > 3) return false;
 
   // Body must contain a call to decoderName

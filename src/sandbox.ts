@@ -63,6 +63,10 @@ var console = {
 };
 var atob = __atob;
 var btoa = __btoa;
+var setTimeout = function(fn) { return 0; };
+var setInterval = function(fn) { return 0; };
+var clearTimeout = function() {};
+var clearInterval = function() {};
 var Buffer = {
   from: function(str, encoding) {
     var decoded = str;

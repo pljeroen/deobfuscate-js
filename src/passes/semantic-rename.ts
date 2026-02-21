@@ -196,12 +196,20 @@ export const semanticRenamePass: ASTPass = {
   },
 };
 
-/** Get all names used in a scope's own bindings */
-function getScopeUsedNames(scope: any): Set<string> {
+/** Get all names bound in any scope from the given scope up to (and including)
+ *  the enclosing function/program scope. This ensures var-hoisted names at the
+ *  function scope are seen even when checking from a ForStatement scope. */
+function getEffectiveScopeUsedNames(scope: any): Set<string> {
   const names = new Set<string>();
-  const bindings = scope.bindings || {};
-  for (const name of Object.keys(bindings)) {
-    names.add(name);
+  let s = scope;
+  while (s) {
+    const bindings = s.bindings || {};
+    for (const name of Object.keys(bindings)) {
+      names.add(name);
+    }
+    // Stop after reaching function or program scope (the hoist target)
+    if (s.path.isFunction() || s.path.isProgram()) break;
+    s = s.parent;
   }
   return names;
 }
@@ -323,7 +331,7 @@ function tryAssignCandidate(
   globalUsedNames: Set<string>,
   scopeScheduledNames: Map<string, Set<string>>,
 ): boolean {
-  const scopeUsed = getScopeUsedNames(path.scope);
+  const scopeUsed = getEffectiveScopeUsedNames(path.scope);
   const scopeKey = getScopeKey(path.scope);
   const scheduled = scopeScheduledNames.get(scopeKey) ?? new Set<string>();
 

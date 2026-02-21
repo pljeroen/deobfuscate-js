@@ -133,7 +133,11 @@ export const antiDebugPass: ASTPass = {
           if (binding.referencePaths.length > 0) return;
           if (binding.constantViolations.length > 0) return;
           const varDecl = path.parentPath;
-          if (varDecl && t.isVariableDeclaration(varDecl.node) && varDecl.node.declarations.length === 1) {
+          if (!varDecl || !t.isVariableDeclaration(varDecl.node)) return;
+          // Never remove the LHS of for-in/for-of — iteration variable is structurally required
+          const grandparent = varDecl.parentPath;
+          if (grandparent?.isForInStatement() || grandparent?.isForOfStatement()) return;
+          if (varDecl.node.declarations.length === 1) {
             varDecl.remove();
           } else {
             path.remove();
@@ -320,17 +324,47 @@ function isRemovableExpr(expr: t.Expression, removedNames: Set<string>): boolean
 
 /**
  * Check if an IIFE body is purely anti-debug wiring (safe to remove entirely).
- * Returns false if the body contains substantial business logic mixed with
- * anti-debug references — in that case, individual statements should be
- * cleaned up rather than removing the entire IIFE.
+ * Returns false if the body contains ANY statement that does not reference a
+ * removed anti-debug name — such statements are business logic that must survive.
  */
 function isSmallAntiDebugBody(fn: t.FunctionExpression | t.ArrowFunctionExpression, removedNames: Set<string>): boolean {
   const body = t.isBlockStatement(fn.body) ? fn.body : null;
   if (!body) return true; // arrow with expression body
-  // If the body has more than 5 statements, it likely contains business logic
-  // alongside anti-debug references — don't remove the entire IIFE
-  if (body.body.length > 5) return false;
-  return true;
+  // Only remove the entire IIFE if EVERY statement references a removed anti-debug name.
+  // A body with even one "clean" statement contains business logic.
+  return body.body.every(stmt => nodeReferencesAny(stmt, removedNames));
+}
+
+/** Check if an arbitrary AST node references any identifier from the given set. */
+function nodeReferencesAny(node: t.Node, names: Set<string>): boolean {
+  let found = false;
+
+  function walk(n: t.Node, parentNode?: t.Node, parentKey?: string): void {
+    if (found) return;
+    if (t.isIdentifier(n) && names.has(n.name)) {
+      if (parentNode && t.isMemberExpression(parentNode) && parentKey === "property" && !parentNode.computed) {
+        // property name, not a reference
+      } else if (parentNode && t.isObjectProperty(parentNode) && parentKey === "key" && !parentNode.computed) {
+        // object key, not a reference
+      } else {
+        found = true;
+        return;
+      }
+    }
+    for (const key of t.VISITOR_KEYS[n.type] || []) {
+      const child = (n as any)[key];
+      if (Array.isArray(child)) {
+        for (const c of child) {
+          if (t.isNode(c)) walk(c, n, key);
+        }
+      } else if (t.isNode(child)) {
+        walk(child, n, key);
+      }
+    }
+  }
+
+  walk(node);
+  return found;
 }
 
 function isObfuscatedName(name: string): boolean {
