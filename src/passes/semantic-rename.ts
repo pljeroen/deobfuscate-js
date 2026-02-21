@@ -17,12 +17,12 @@ import { traverse, t } from "../babel.js";
 import type { File } from "@babel/types";
 import type { ASTPass } from "../types.js";
 
-const HEX_PREFIX = /^_0x/;
+const HEX_PATTERN = /_0x/;
 
 const COUNTER_NAMES = ["i", "j", "k", "l", "m", "n"];
 
 function isObfuscatedName(name: string): boolean {
-  return HEX_PREFIX.test(name);
+  return HEX_PATTERN.test(name);
 }
 
 export const semanticRenamePass: ASTPass = {

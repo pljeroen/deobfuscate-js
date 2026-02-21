@@ -44,6 +44,21 @@ describe("R16: obfuscator fingerprinting", () => {
     expect(result.patterns).toContain("control-flow-flattening");
   });
 
+  it("detects a0_0x prefixed identifiers as javascript-obfuscator", () => {
+    const ast = parse(`
+      const a0_0x61431b = a0_0x2c31;
+      function a0_0x3c57() {
+        const _0x29208c = ['split', 'shift', 'map'];
+        a0_0x3c57 = function() { return _0x29208c; };
+        return a0_0x3c57();
+      }
+      function a0_0x2c31(idx) { return a0_0x3c57()[idx]; }
+    `);
+    const result = fingerprint(ast);
+    expect(result.obfuscator).toBe("javascript-obfuscator");
+    expect(result.patterns).toContain("hex-identifiers");
+  });
+
   it("returns null obfuscator for plain code", () => {
     const ast = parse(`
       function add(a, b) { return a + b; }

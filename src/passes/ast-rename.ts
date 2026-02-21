@@ -40,6 +40,8 @@ const DESCRIPTIVE_NAMES = [
 ];
 
 function shouldRename(name: string): boolean {
+  // Always rename obfuscated names containing _0x (e.g., _0x1234, a0_0x5678)
+  if (name.includes("_0x")) return true;
   if (name.length > 2) return false;
   if (KEEP_NAMES.has(name)) return false;
   if (GLOBALS.has(name)) return false;
@@ -55,7 +57,7 @@ export const astRenamePass: ASTPass = {
     let hasObfuscated = false;
     traverse(ast, {
       Identifier(path) {
-        if (path.node.name.startsWith("_0x")) {
+        if (path.node.name.includes("_0x")) {
           hasObfuscated = true;
           path.stop();
         }

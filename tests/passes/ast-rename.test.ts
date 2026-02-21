@@ -122,6 +122,49 @@ describe("AST rename pass", () => {
     });
   });
 
+  describe("_0x-prefixed identifiers", () => {
+    it("renames _0x-prefixed function parameters", () => {
+      const result = rename("function f(_0x1234, _0x5678) { return _0x1234 + _0x5678; }");
+      expect(result).not.toContain("_0x1234");
+      expect(result).not.toContain("_0x5678");
+    });
+
+    it("renames _0x-prefixed local variables", () => {
+      const result = rename("function f() { var _0xabc = 1; return _0xabc; }");
+      expect(result).not.toContain("_0xabc");
+    });
+
+    it("renames _0x-prefixed arrow function params", () => {
+      const result = rename("const f = (_0x1a2b, _0x3c4d) => _0x1a2b + _0x3c4d;");
+      expect(result).not.toContain("_0x1a2b");
+      expect(result).not.toContain("_0x3c4d");
+    });
+
+    it("does not rename _0x property access", () => {
+      const result = rename("function f(_0x1234) { return _0x1234._0x5678; }");
+      expect(result).toContain("._0x5678");
+    });
+
+    it("renames mix of short and _0x names", () => {
+      const result = rename("function f(n, _0xabc) { return n + _0xabc; }");
+      expect(result).not.toContain("(n,");
+      expect(result).not.toContain("_0xabc");
+    });
+
+    it("renames a0_0x prefixed identifiers", () => {
+      const result = rename("function f(a0_0x1234, a0_0x5678) { return a0_0x1234 + a0_0x5678; }");
+      expect(result).not.toContain("a0_0x1234");
+      expect(result).not.toContain("a0_0x5678");
+    });
+
+    it("does not collide _0x renames with existing names", () => {
+      const result = rename("function f(_0x1234, value) { return _0x1234 + value; }");
+      // _0x1234 should be renamed but NOT to 'value'
+      expect(result).not.toContain("_0x1234");
+      expect(result).toMatch(/value/); // original 'value' preserved
+    });
+  });
+
   describe("undeclared global collision", () => {
     it("does not rename to a name that collides with undeclared reference", () => {
       // 'value' is used as undeclared global, so should not be used as a rename target

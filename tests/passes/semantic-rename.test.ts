@@ -88,6 +88,16 @@ describe("R17: semantic variable renaming", () => {
       expect(result).toContain("JSON");
     });
 
+    it("recognizes a0_0x prefixed names as obfuscated", () => {
+      const result = deobfuscate(`
+        for (var a0_0x1a = 0; a0_0x1a < 10; a0_0x1a++) {
+          console.log(a0_0x1a);
+        }
+      `);
+      expect(result).toContain("var i = 0");
+      expect(result).not.toContain("a0_0x1a");
+    });
+
     it("does not modify code without obfuscated names", () => {
       const result = deobfuscate(`
         function add(a, b) { return a + b; }

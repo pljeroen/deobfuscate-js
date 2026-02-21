@@ -41,6 +41,17 @@ export const constantFoldPass: ASTPass = {
             changed = true;
             return;
           }
+          // ![] -> false, !"" -> true (common obfuscator patterns)
+          if (op === "!" && t.isArrayExpression(arg) && arg.elements.length === 0) {
+            path.replaceWith(t.booleanLiteral(false));
+            changed = true;
+            return;
+          }
+          if (op === "!" && t.isStringLiteral(arg)) {
+            path.replaceWith(t.booleanLiteral(!arg.value));
+            changed = true;
+            return;
+          }
           if (op === "void" && t.isNumericLiteral(arg) && arg.value === 0) {
             path.replaceWith(t.identifier("undefined"));
             changed = true;

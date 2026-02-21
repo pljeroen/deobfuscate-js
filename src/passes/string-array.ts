@@ -272,9 +272,10 @@ function detectPattern(ast: File, source?: string): StringArrayPattern | null {
       if (topStmt && setupStmtNodes.has(topStmt.node as t.Statement)) return;
 
       calleeNames.add(aliasName);
-      aliasDefs.push(`var ${aliasName} = ${targetName};`);
 
-      // For top-level aliases, track their statement index for removal
+      // For top-level aliases, track their statement index for removal.
+      // The original declaration will be included in setupCode via removeIndices,
+      // so do NOT also add to aliasDefs (would cause duplicate declaration error).
       const parentFn = path.findParent(
         p => t.isFunctionDeclaration(p.node) || t.isFunctionExpression(p.node),
       );
@@ -286,6 +287,9 @@ function detectPattern(ast: File, source?: string): StringArrayPattern | null {
             removeIndices.push(idx);
           }
         }
+      } else {
+        // Function-scoped aliases need explicit defs for the sandbox
+        aliasDefs.push(`var ${aliasName} = ${targetName};`);
       }
     },
   });

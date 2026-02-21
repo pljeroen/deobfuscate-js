@@ -82,6 +82,20 @@ describe("constant folding", () => {
     });
   });
 
+  describe("obfuscator boolean patterns", () => {
+    it("folds ![] -> false", () => {
+      expect(fold("var x = ![];")).toContain("var x = false");
+    });
+
+    it("folds !![] -> true", () => {
+      expect(fold("var x = !![];")).toContain("var x = true");
+    });
+
+    it("folds !'' -> true", () => {
+      expect(fold("var x = !'';")).toContain("var x = true");
+    });
+  });
+
   describe("typeof on literals", () => {
     it("folds typeof undefined", () => {
       expect(fold('var x = typeof undefined;')).toContain('var x = "undefined"');

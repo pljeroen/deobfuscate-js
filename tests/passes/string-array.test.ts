@@ -232,6 +232,48 @@ describe("string array resolution", () => {
       expect(result).not.toContain("_0xalias");
     });
 
+    it("resolves top-level alias with a0_0x prefix (no duplicate declaration)", () => {
+      const result = deobfuscate(`
+        const a0_0x61431b = a0_0x2c31;
+        function a0_0x3c57() {
+          const _0x29208c = ['log', 'Hello', 'world', 'foo', 'bar'];
+          a0_0x3c57 = function() { return _0x29208c; };
+          return a0_0x3c57();
+        }
+        function a0_0x2c31(idx) {
+          const arr = a0_0x3c57();
+          a0_0x2c31 = function(i) { return arr[i]; };
+          return a0_0x2c31(idx);
+        }
+        console[a0_0x61431b(0)](a0_0x61431b(1));
+      `);
+      expect(result).toContain('"log"');
+      expect(result).toContain('"Hello"');
+      expect(result).not.toContain("a0_0x");
+    });
+
+    it("resolves a0_0x decoder calls via top-level alias", () => {
+      const result = deobfuscate(`
+        const a0_0x61431b = a0_0x2c31;
+        function a0_0x3c57() {
+          const _0x29208c = ['log', 'Hello', 'world', 'foo', 'bar'];
+          a0_0x3c57 = function() { return _0x29208c; };
+          return a0_0x3c57();
+        }
+        function a0_0x2c31(idx) {
+          const arr = a0_0x3c57();
+          a0_0x2c31 = function(i) { return arr[i]; };
+          return a0_0x2c31(idx);
+        }
+        console[a0_0x61431b(0)](a0_0x61431b(1));
+      `);
+      expect(result).toContain('"log"');
+      expect(result).toContain('"Hello"');
+      // Decoder infrastructure should be removed
+      expect(result).not.toContain("a0_0x3c57");
+      expect(result).not.toContain("a0_0x2c31");
+    });
+
     it("does not break existing function-scoped alias resolution", () => {
       const result = deobfuscate(`
         var _0x4e2c = ['log', 'Hello', 'world', 'foo', 'bar'];

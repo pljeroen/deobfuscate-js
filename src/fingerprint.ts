@@ -12,7 +12,7 @@ export interface FingerprintResult {
   patterns: string[];
 }
 
-const HEX_PREFIX = /^_0x/;
+const HEX_PATTERN = /_0x/;
 
 /**
  * Analyze an AST and attempt to identify the obfuscation tool used.
@@ -39,7 +39,7 @@ function detectHexIdentifiers(ast: File): boolean {
 
   traverse(ast, {
     Identifier(path) {
-      if (HEX_PREFIX.test(path.node.name)) {
+      if (HEX_PATTERN.test(path.node.name)) {
         hexNames.add(path.node.name);
       }
     },
@@ -56,7 +56,7 @@ function detectStringArrayDecoder(ast: File): boolean {
   traverse(ast, {
     VariableDeclarator(path) {
       if (!t.isIdentifier(path.node.id)) return;
-      if (!HEX_PREFIX.test(path.node.id.name)) return;
+      if (!HEX_PATTERN.test(path.node.id.name)) return;
 
       // Array of string literals assigned to a _0x variable
       if (t.isArrayExpression(path.node.init)) {
@@ -70,13 +70,13 @@ function detectStringArrayDecoder(ast: File): boolean {
     },
 
     FunctionDeclaration(path) {
-      if (!path.node.id || !HEX_PREFIX.test(path.node.id.name)) return;
+      if (!path.node.id || !HEX_PATTERN.test(path.node.id.name)) return;
 
       // Function that returns array[index] pattern
       const body = path.node.body.body;
       if (body.length === 1 && t.isReturnStatement(body[0])) {
         const arg = body[0].argument;
-        if (t.isMemberExpression(arg) && t.isIdentifier(arg.object) && HEX_PREFIX.test(arg.object.name)) {
+        if (t.isMemberExpression(arg) && t.isIdentifier(arg.object) && HEX_PATTERN.test(arg.object.name)) {
           hasDecoderFunction = true;
         }
       }
