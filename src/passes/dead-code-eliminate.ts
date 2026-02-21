@@ -105,6 +105,9 @@ export const deadCodeEliminatePass: ASTPass = {
     // Pass 3: Remove unused variable declarations
     traverse(ast, {
       VariableDeclaration(path) {
+        // Never remove the LHS of for-in/for-of — iteration variable is structurally required
+        if (path.parentPath?.isForInStatement() || path.parentPath?.isForOfStatement()) return;
+
         const declarators = path.get("declarations");
         const toRemove: number[] = [];
         const isNested = !!path.getFunctionParent();

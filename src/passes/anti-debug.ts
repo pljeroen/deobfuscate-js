@@ -300,22 +300,37 @@ function isRemovableExpr(expr: t.Expression, removedNames: Set<string>): boolean
     }
   }
 
-  // IIFE containing call to removed function
+  // IIFE containing call to removed function — only if body is purely anti-debug
   if (t.isCallExpression(expr)) {
     const callee = expr.callee;
     if (t.isFunctionExpression(callee) || t.isArrowFunctionExpression(callee)) {
-      if (referencesAny(callee, removedNames)) return true;
+      if (referencesAny(callee, removedNames) && isSmallAntiDebugBody(callee, removedNames)) return true;
     }
     // Nested IIFE: (function() { innerCall(this, function() { ... })() })()
     if (t.isCallExpression(callee)) {
       const inner = callee.callee;
       if (t.isFunctionExpression(inner) || t.isArrowFunctionExpression(inner)) {
-        if (referencesAny(inner, removedNames)) return true;
+        if (referencesAny(inner, removedNames) && isSmallAntiDebugBody(inner, removedNames)) return true;
       }
     }
   }
 
   return false;
+}
+
+/**
+ * Check if an IIFE body is purely anti-debug wiring (safe to remove entirely).
+ * Returns false if the body contains substantial business logic mixed with
+ * anti-debug references — in that case, individual statements should be
+ * cleaned up rather than removing the entire IIFE.
+ */
+function isSmallAntiDebugBody(fn: t.FunctionExpression | t.ArrowFunctionExpression, removedNames: Set<string>): boolean {
+  const body = t.isBlockStatement(fn.body) ? fn.body : null;
+  if (!body) return true; // arrow with expression body
+  // If the body has more than 5 statements, it likely contains business logic
+  // alongside anti-debug references — don't remove the entire IIFE
+  if (body.body.length > 5) return false;
+  return true;
 }
 
 function isObfuscatedName(name: string): boolean {

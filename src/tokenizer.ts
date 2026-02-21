@@ -148,7 +148,7 @@ export function tokenize(source: string): Token[] {
     if (ch === "/" && canBeRegex(tokens)) {
       advance(); // opening /
       while (pos < source.length && peek() !== "/") {
-        if (peek() === "\\") advance();
+        if (peek() === "\\") { advance(); advance(); continue; }
         if (peek() === "[") {
           advance();
           while (pos < source.length && peek() !== "]") {
