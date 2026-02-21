@@ -42,6 +42,11 @@ export const bundlerUnpackPass: ASTPass = {
     const detection = detectWebpack4(iifeExpr) ?? detectWebpack5(iifeExpr) ?? detectBrowserify(iifeExpr);
     if (!detection || detection.modules.length === 0) return ast;
 
+    // Apply graph-based module naming when there are multiple modules
+    if (detection.modules.length > 1) {
+      renameModulesByGraph(detection.modules, detection.entryIndex);
+    }
+
     // Build metadata comment
     const comment = ` ${detection.type} bundle | ${detection.modules.length} modules`;
 
@@ -62,6 +67,7 @@ export const bundlerUnpackPass: ASTPass = {
 interface DetectionResult {
   type: string;
   modules: t.Statement[];
+  entryIndex?: number;
 }
 
 /**
@@ -84,7 +90,10 @@ function detectWebpack4(expr: t.CallExpression): DetectionResult | null {
   const arg = expr.arguments[0];
 
   const modules = extractModulesFrom(arg);
-  return modules ? { type: "webpack", modules } : null;
+  if (!modules) return null;
+
+  const entryIndex = findBootstrapEntry(callee.body);
+  return { type: "webpack", modules, entryIndex };
 }
 
 /**
@@ -271,4 +280,135 @@ function sanitizeModuleId(path: string): string {
     .replace(/^\.\//, "")
     .replace(/\.[jt]sx?$/, "")
     .replace(/[^a-zA-Z0-9_]/g, "_");
+}
+
+/**
+ * Find the entry module index from the bootstrap body.
+ * Looks for __webpack_require__(N) calls in the top-level bootstrap function.
+ */
+function findBootstrapEntry(body: t.BlockStatement): number | undefined {
+  for (const stmt of body.body) {
+    let call: t.CallExpression | null = null;
+
+    if (t.isExpressionStatement(stmt) && t.isCallExpression(stmt.expression)) {
+      call = stmt.expression;
+    } else if (t.isReturnStatement(stmt) && t.isCallExpression(stmt.argument)) {
+      call = stmt.argument;
+    }
+
+    if (
+      call &&
+      t.isIdentifier(call.callee) && call.callee.name === "__webpack_require__" &&
+      call.arguments.length >= 1 && t.isNumericLiteral(call.arguments[0])
+    ) {
+      return call.arguments[0].value;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Collect __webpack_require__(N) calls from an AST subtree.
+ * Returns deduplicated list of required module IDs.
+ */
+function collectWebpackRequires(node: t.Node): string[] {
+  const requires = new Set<string>();
+  visitNode(node, (n) => {
+    if (
+      t.isCallExpression(n) &&
+      t.isIdentifier(n.callee) && n.callee.name === "__webpack_require__" &&
+      n.arguments.length >= 1 && t.isNumericLiteral(n.arguments[0])
+    ) {
+      requires.add(String(n.arguments[0].value));
+    }
+  });
+  return [...requires];
+}
+
+/**
+ * Simple recursive AST visitor.
+ */
+function visitNode(node: t.Node, cb: (n: t.Node) => void): void {
+  cb(node);
+  for (const key of Object.keys(node)) {
+    if (key === "type" || key === "start" || key === "end" || key === "loc" ||
+        key === "extra" || key === "leadingComments" || key === "trailingComments" ||
+        key === "innerComments") continue;
+    const child = (node as any)[key];
+    if (Array.isArray(child)) {
+      for (const item of child) {
+        if (item && typeof item === "object" && typeof item.type === "string") {
+          visitNode(item, cb);
+        }
+      }
+    } else if (child && typeof child === "object" && typeof child.type === "string") {
+      visitNode(child, cb);
+    }
+  }
+}
+
+/**
+ * Rename extracted module functions based on dependency graph analysis.
+ *
+ * Naming strategy:
+ * - Entry module (called by bootstrap) → __module_entry__
+ * - Leaf modules (zero out-degree) → __module_leaf_N__
+ * - Utility modules (in-degree >= 2 AND out-degree >= 2) → __module_util_N__
+ * - Remaining → __module_N__ (unchanged)
+ */
+function renameModulesByGraph(modules: t.Statement[], entryIndex?: number): void {
+  // Build module map: numeric id → FunctionDeclaration
+  const moduleMap = new Map<string, t.FunctionDeclaration>();
+  for (const stmt of modules) {
+    if (!t.isFunctionDeclaration(stmt) || !stmt.id) continue;
+    const match = stmt.id.name.match(/^__module_(\d+)__$/);
+    if (!match) continue;
+    moduleMap.set(match[1], stmt);
+  }
+
+  // Build dependency graph
+  const outEdges = new Map<string, string[]>();
+  const inDegree = new Map<string, number>();
+  for (const id of moduleMap.keys()) {
+    outEdges.set(id, []);
+    inDegree.set(id, 0);
+  }
+
+  for (const [id, func] of moduleMap) {
+    const requires = collectWebpackRequires(func.body);
+    outEdges.set(id, requires);
+    for (const req of requires) {
+      if (inDegree.has(req)) {
+        inDegree.set(req, inDegree.get(req)! + 1);
+      }
+    }
+  }
+
+  // Only apply graph-based naming when inter-module dependencies exist
+  let totalEdges = 0;
+  for (const edges of outEdges.values()) {
+    totalEdges += edges.length;
+  }
+  if (totalEdges === 0) return;
+
+  const entryId = entryIndex !== undefined ? String(entryIndex) : undefined;
+
+  // Classify and rename
+  for (const [id, func] of moduleMap) {
+    const outDeg = outEdges.get(id)?.length ?? 0;
+    const inDeg = inDegree.get(id) ?? 0;
+
+    let newName: string;
+    if (id === entryId) {
+      newName = "__module_entry__";
+    } else if (outDeg === 0) {
+      newName = `__module_leaf_${id}__`;
+    } else if (inDeg >= 2 && outDeg >= 2) {
+      newName = `__module_util_${id}__`;
+    } else {
+      continue; // Keep numeric name
+    }
+
+    func.id = t.identifier(newName);
+  }
 }

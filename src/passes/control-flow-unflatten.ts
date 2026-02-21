@@ -323,8 +323,14 @@ function unflattenArithmeticDispatch(whilePath: NodePath<t.WhileStatement>): boo
         ) {
           nextState = -stmt.expression.right.argument.value;
         } else {
-          // Non-deterministic state transition — bail out
-          return false;
+          // Try computed transition: state = state op C
+          const computed = evaluateComputedTransition(stmt.expression.right, stateVarName, label);
+          if (computed !== null) {
+            nextState = computed;
+          } else {
+            // Non-deterministic state transition — bail out
+            return false;
+          }
         }
       } else {
         stmtsWithoutStateAssign.push(stmt);
@@ -368,4 +374,47 @@ function unflattenArithmeticDispatch(whilePath: NodePath<t.WhileStatement>): boo
   removeBindingDeclaration(stateBinding);
 
   return true;
+}
+
+/**
+ * Evaluate a computed state transition using the current case label.
+ * Handles: state + C, state * K + C, state ^ C.
+ */
+function evaluateComputedTransition(
+  right: t.Expression,
+  stateVarName: string,
+  currentState: number,
+): number | null {
+  if (!t.isBinaryExpression(right)) return null;
+
+  // state + C
+  if (
+    right.operator === "+" &&
+    t.isIdentifier(right.left) && right.left.name === stateVarName &&
+    t.isNumericLiteral(right.right)
+  ) {
+    return currentState + right.right.value;
+  }
+
+  // state * K + C (affine: outer + with inner *)
+  if (
+    right.operator === "+" &&
+    t.isBinaryExpression(right.left) && right.left.operator === "*" &&
+    t.isIdentifier(right.left.left) && right.left.left.name === stateVarName &&
+    t.isNumericLiteral(right.left.right) &&
+    t.isNumericLiteral(right.right)
+  ) {
+    return currentState * right.left.right.value + right.right.value;
+  }
+
+  // state ^ C (XOR)
+  if (
+    right.operator === "^" &&
+    t.isIdentifier(right.left) && right.left.name === stateVarName &&
+    t.isNumericLiteral(right.right)
+  ) {
+    return (currentState ^ right.right.value);
+  }
+
+  return null;
 }

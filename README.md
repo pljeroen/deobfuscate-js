@@ -1,6 +1,6 @@
 # deobfuscate-js
 
-![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-430%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-445%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
 
 JavaScript de-obfuscation toolkit. Reverses javascript-obfuscator/obfuscator.io transforms (string array encoding, control flow flattening, proxy function objects, anti-debug traps) and handles webpack/browserify bundles. Combines AST-based transforms with token-level formatting to produce readable output from obfuscated or minified JavaScript.
 
@@ -61,7 +61,7 @@ Detects and extracts individual modules from bundled JavaScript:
 - **Webpack 5** -- Arrow IIFE with `__webpack_modules__` object
 - **Browserify** -- 3-parameter IIFE with `[function, dependencies]` tuples
 
-Modules are extracted as named function declarations (`__module_0__`, `__module_1__`, etc.). Emits a metadata comment indicating bundle type and module count.
+Modules are extracted as named function declarations. When inter-module dependencies exist, modules are named by graph role: `__module_entry__` (bootstrap entry point), `__module_leaf_N__` (zero out-degree), `__module_util_N__` (high in-degree and out-degree). Falls back to numeric naming (`__module_N__`) when no dependency structure exists. Emits a metadata comment indicating bundle type and module count.
 
 #### Constant Fold
 
@@ -84,6 +84,7 @@ Inlines variables assigned exactly once to a constant value, where the binding i
 
 - Identifier aliases (`const alias = original` when `original` is also constant) -- scope-safe: skips references where the target name is shadowed in an inner scope
 - Constant array element access (`const arr = ["a","b"]; arr[0]` -> `"a"`)
+- Cross-branch `typeof` folding: when a variable is assigned the same type in both branches of an if/else, `typeof x` is folded to the type string (e.g., `"string"`, `"number"`, `"boolean"`)
 
 #### Dead Code Eliminate
 
@@ -148,7 +149,7 @@ b();
 c();
 ```
 
-Resolves the order array (pipe-delimited string or array literal), maps case labels to statement bodies, emits in resolved order, and removes dispatcher variables. Capped at 25 iterations.
+Resolves the order array (pipe-delimited string or array literal), maps case labels to statement bodies, emits in resolved order, and removes dispatcher variables. Also handles arithmetic state-machine dispatchers with constant (`state = N`), additive (`state = state + C`), affine (`state = state * K + C`), and XOR (`state = state ^ C`) transitions. Capped at 25 iterations with 1000-state trace limit.
 
 #### Anti-Debug Removal
 
@@ -291,7 +292,7 @@ Both tools produce syntactically valid output on all samples. Losses are minor (
 ## Testing
 
 ```bash
-npm test           # run all tests (430)
+npm test           # run all tests (445)
 npm run test:watch # watch mode
 ```
 
