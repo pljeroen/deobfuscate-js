@@ -77,11 +77,14 @@ for t in "${targets[@]}"; do
   $ADAPTER --input "$input" --output "$output" $unsafe_flag 2>&1
 
   # Count failures in output (records with empty deobfuscated field)
-  failures=$(grep -c '"deobfuscated":""' "$output" 2>/dev/null || echo "0")
+  failures=$(grep -c '"deobfuscated":""' "$output" 2>/dev/null || true)
+  failures=${failures:-0}
+  failures=$(echo "$failures" | tr -d '[:space:]')
 
   total_samples=$((total_samples + samples))
   total_failures=$((total_failures + failures))
-  summary_lines+=("  $t: $samples samples, $failures failures ($(( (failures * 100) / (samples > 0 ? samples : 1) ))%)")
+  pct=$(( samples > 0 ? (failures * 100) / samples : 0 ))
+  summary_lines+=("  $t: $samples samples, $failures failures (${pct}%)")
 
   echo ""
 done
@@ -102,11 +105,14 @@ if [ "$run_combinations" = true ]; then
 
       $ADAPTER --input "$combo_input" --output "$output" $unsafe_flag 2>&1
 
-      failures=$(grep -c '"deobfuscated":""' "$output" 2>/dev/null || echo "0")
+      failures=$(grep -c '"deobfuscated":""' "$output" 2>/dev/null || true)
+      failures=${failures:-0}
+      failures=$(echo "$failures" | tr -d '[:space:]')
 
       total_samples=$((total_samples + samples))
       total_failures=$((total_failures + failures))
-      summary_lines+=("  C77-0 (all combined): $samples samples, $failures failures ($(( (failures * 100) / (samples > 0 ? samples : 1) ))%)")
+      pct=$(( samples > 0 ? (failures * 100) / samples : 0 ))
+      summary_lines+=("  C77-0 (all combined): $samples samples, $failures failures (${pct}%)")
 
       echo ""
     fi
