@@ -531,4 +531,82 @@ describe("string array resolution", () => {
       expect(result).not.toContain("_0xwrap");
     });
   });
+
+  describe("Step 3b false-positive wrapper detection", () => {
+    it("does not classify user function with decoder alias as scoped wrapper", () => {
+      // User function `f` has ≤3 body statements and contains an alias to the decoder.
+      // Step 3b must NOT treat it as a scoped wrapper — it has no `return decoder(...)` pattern.
+      const result = deobfuscate(`
+        var _0x4e2c = ['log', 'Hello', 'world'];
+        function _0xdec(idx) { return _0x4e2c[idx]; }
+        var GET = (function () {
+          function f(s) {
+            var _0xlocal = _0xdec;
+            return _0xlocal(0) + s;
+          }
+          return f;
+        }());
+        console[_0xdec(0)](GET("!"));
+      `);
+      // The alias call _0xlocal(0) should be resolved to "log"
+      expect(result).toContain('"log"');
+      // f should NOT be removed — it's a user function
+      expect(result).toContain("function f");
+      // The alias declaration should be removed (it's dead after inlining)
+      expect(result).not.toContain("_0xlocal");
+    });
+
+    it("still detects genuine scoped wrappers with return-call pattern", () => {
+      // Genuine scoped wrapper inside a function: has `return decoder(...)` in body.
+      // The wrapper is detected as a scoped wrapper and its calls are resolved.
+      const result = deobfuscate(`
+        var _0x4e2c = ['log', 'Hello', 'world'];
+        function _0xdec(idx) { return _0x4e2c[idx]; }
+        function outer() {
+          function _0xwrap(a) { return _0xdec(a - 0x10); }
+          console[_0xwrap(0x10)]("test");
+        }
+      `);
+      // _0xwrap(0x10) => _0xdec(0) => "log" — call is resolved
+      expect(result).toContain('console["log"]');
+      // Top-level setup (array + decoder) should be removed
+      expect(result).not.toContain("_0x4e2c");
+    });
+
+    it("resolves calls in user functions that alias decoder inside IIFE", () => {
+      // Reproduces the benchmark failure: user functions inside IIFE that alias
+      // the decoder should have their calls resolved and alias declarations removed,
+      // but the user functions themselves must be preserved.
+      const result = deobfuscate(`
+        var _0x4e2c = ['log', 'Hello', 'world'];
+        function _0xdec(idx) { return _0x4e2c[idx]; }
+        var GET = (function () {
+          function f(s) {
+            var _0x45751e = _0xdec;
+            if ('test' !== _0x45751e(0)) { return s; }
+            else { return _0x45751e(1); }
+          }
+          function g(s) {
+            var _0x1f3e6c = _0xdec;
+            return _0x1f3e6c(2);
+          }
+          return { f: f, g: g };
+        }());
+        console[_0xdec(0)](GET.f("x"));
+      `);
+      // All decoder calls should be resolved
+      expect(result).toContain('"log"');
+      expect(result).toContain('"Hello"');
+      expect(result).toContain('"world"');
+      // User functions f and g should still exist
+      expect(result).toContain("function f");
+      expect(result).toContain("function g");
+      // Alias declarations should be removed
+      expect(result).not.toContain("_0x45751e");
+      expect(result).not.toContain("_0x1f3e6c");
+      // Setup should be removed
+      expect(result).not.toContain("_0x4e2c");
+      expect(result).not.toContain("_0xdec");
+    });
+  });
 });

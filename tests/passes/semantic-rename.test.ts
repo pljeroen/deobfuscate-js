@@ -107,4 +107,48 @@ describe("R17: semantic variable renaming", () => {
       expect(result).toContain("return");
     });
   });
+
+  describe("cross-scope collision avoidance", () => {
+    it("does not rename nested scope variable to same name as outer scope rename", () => {
+      // Both _0x1 and _0x2 match .length pattern → both would get "len".
+      // The inner rename must NOT shadow the outer rename.
+      const result = deobfuscate(`
+        function outer(arr) {
+          var _0x1 = arr.length;
+          function inner(arr2) {
+            var _0x2 = arr2.length;
+            console.log(_0x1, _0x2);
+          }
+          return inner;
+        }
+      `);
+      // Both should be renamed, but to DIFFERENT names
+      expect(result).not.toContain("_0x1");
+      expect(result).not.toContain("_0x2");
+      // The inner function's variable must not shadow the outer's
+      const match = result.match(/console\.log\((\w+),\s*(\w+)\)/);
+      expect(match).toBeTruthy();
+      expect(match![1]).not.toBe(match![2]);
+    });
+
+    it("does not shadow existing non-obfuscated name in parent scope", () => {
+      // Parent scope has `len`. Inner scope has a .length _0x variable.
+      // The inner rename must NOT pick `len` since it would shadow the parent.
+      const result = deobfuscate(`
+        function outer(arr) {
+          var len = arr.length;
+          function inner(arr2) {
+            var _0x1 = arr2.length;
+            console.log(len, _0x1);
+          }
+        }
+      `);
+      expect(result).not.toContain("_0x1");
+      // `len` in console.log must still reference outer's variable
+      const match = result.match(/console\.log\((\w+),\s*(\w+)\)/);
+      expect(match).toBeTruthy();
+      expect(match![1]).toBe("len");
+      expect(match![1]).not.toBe(match![2]);
+    });
+  });
 });
