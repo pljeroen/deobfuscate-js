@@ -222,14 +222,18 @@ function detectPattern(ast: File, source?: string): StringArrayPattern | null {
         if (node.params.length < 1) return;
         if (node.body.body.length > 3) return;
 
-        // Body must call a known callee (decoder, top-level wrapper, or already-detected scoped wrapper)
-        const bodyCode = generateNode(node.body as any).code;
+        // Body must forward to a known callee via a ReturnStatement calling a known callee.
+        // This prevents false positives on user functions that merely contain alias declarations
+        // (e.g. `var x = decoder;`) — genuine wrappers always have `return decoder(...)`.
         const paramNames = new Set(
           node.params.filter(p => t.isIdentifier(p)).map(p => (p as t.Identifier).name),
         );
-        const callsKnown = [...calleeNames].some(
-          cn => !paramNames.has(cn) && new RegExp(`\\b${escapeRegExp(cn)}\\b`).test(bodyCode),
-        );
+        const callsKnown = node.body.body.some(s => {
+          if (!t.isReturnStatement(s) || !t.isCallExpression(s.argument)) return false;
+          const callee = s.argument.callee;
+          return t.isIdentifier(callee) && calleeNames.has(callee.name) &&
+                 !paramNames.has(callee.name);
+        });
         if (!callsKnown) return;
 
         // Found a scoped wrapper
@@ -237,13 +241,14 @@ function detectPattern(ast: File, source?: string): StringArrayPattern | null {
         scopedWrapperDefs.push(generateNode(node as any).code);
 
         // Extract referenced variables from enclosing scope (offset objects)
+        const wrapperBodyCode = generateNode(node.body as any).code;
         const parentFnNode = parentFn.node as t.FunctionDeclaration | t.FunctionExpression;
         for (const stmt of parentFnNode.body.body) {
           if (!t.isVariableDeclaration(stmt)) continue;
           for (const d of stmt.declarations) {
             if (!t.isIdentifier(d.id)) continue;
             if (extractedContextNames.has(d.id.name)) continue;
-            if (new RegExp(`\\b${escapeRegExp(d.id.name)}\\b`).test(bodyCode)) {
+            if (new RegExp(`\\b${escapeRegExp(d.id.name)}\\b`).test(wrapperBodyCode)) {
               extractedContextNames.add(d.id.name);
               scopedContextDefs.push(generateNode(stmt as any).code);
             }

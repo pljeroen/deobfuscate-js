@@ -175,7 +175,11 @@ export const semanticRenamePass: ASTPass = {
     // Detect addEventListener callback event param
     detectEventParam(ast, scopeRenames, globalUsedNames, scopeScheduledNames);
 
-    // Apply renames via scope API — each binding renamed independently
+    // Apply renames via scope API — each binding renamed independently.
+    // Guard: skip if target name already exists in the scope chain (from an earlier
+    // rename applied in an outer scope, or an existing non-obfuscated binding).
+    // This prevents shadowing collisions when parent and child scopes both
+    // collected the same target name during the detection phase.
     if (scopeRenames.size > 0) {
       traverse(ast, {
         Scope(path) {
@@ -185,6 +189,7 @@ export const semanticRenamePass: ASTPass = {
             if (!binding) continue;
             const bindingUid = `${oldName}@${binding.identifier.start}`;
             if (bindingUid === uid) {
+              if (path.scope.hasBinding(newName)) continue;
               path.scope.rename(oldName, newName);
             }
           }
@@ -195,24 +200,6 @@ export const semanticRenamePass: ASTPass = {
     return ast;
   },
 };
-
-/** Get all names bound in any scope from the given scope up to (and including)
- *  the enclosing function/program scope. This ensures var-hoisted names at the
- *  function scope are seen even when checking from a ForStatement scope. */
-function getEffectiveScopeUsedNames(scope: any): Set<string> {
-  const names = new Set<string>();
-  let s = scope;
-  while (s) {
-    const bindings = s.bindings || {};
-    for (const name of Object.keys(bindings)) {
-      names.add(name);
-    }
-    // Stop after reaching function or program scope (the hoist target)
-    if (s.path.isFunction() || s.path.isProgram()) break;
-    s = s.parent;
-  }
-  return names;
-}
 
 // --- Type-informed pattern detection ---
 
@@ -331,12 +318,11 @@ function tryAssignCandidate(
   globalUsedNames: Set<string>,
   scopeScheduledNames: Map<string, Set<string>>,
 ): boolean {
-  const scopeUsed = getEffectiveScopeUsedNames(path.scope);
   const scopeKey = getScopeKey(path.scope);
   const scheduled = scopeScheduledNames.get(scopeKey) ?? new Set<string>();
 
   for (const candidate of candidates) {
-    if ((globalUsedNames.has(candidate) && scopeUsed.has(candidate)) || scheduled.has(candidate)) {
+    if (path.scope.hasBinding(candidate) || scheduled.has(candidate)) {
       continue;
     }
     scopeRenames.set(uid, { oldName, newName: candidate });
