@@ -81,14 +81,19 @@ export const astSimplifyPass: ASTPass = {
 
       // Ternary expression statements → if/else
       // a ? b() : c()  →  if (a) { b(); } else { c(); }
+      // a ? b() : 0    →  if (a) { b(); }  (pure alternate dropped)
       ConditionalExpression(path) {
         // Only convert when the ternary is the entire expression statement
         if (!path.parentPath.isExpressionStatement()) return;
 
+        // Drop pure alternate (e.g. `cond ? sideEffect() : 0`)
+        const alt = isLiteral(path.node.alternate)
+          ? null
+          : t.blockStatement([t.expressionStatement(path.node.alternate)]);
         const ifStmt = t.ifStatement(
           path.node.test,
           t.blockStatement([t.expressionStatement(path.node.consequent)]),
-          t.blockStatement([t.expressionStatement(path.node.alternate)]),
+          alt,
         );
         path.parentPath.replaceWith(ifStmt);
       },
@@ -119,14 +124,15 @@ export const astSimplifyPass: ASTPass = {
       IfStatement(path) {
         const { consequent, alternate } = path.node;
 
-        // Remove empty else: if (a) { b(); } else {} → if (a) { b(); }
-        if (alternate && isEmptyBlock(alternate)) {
+        // Remove effect-free else: if (a) { b(); } else {} → if (a) { b(); }
+        // Also handles: if (a) { b(); } else { 0; } → if (a) { b(); }
+        if (alternate && isEffectFreeBlock(alternate)) {
           path.node.alternate = null;
           return;
         }
 
         // Invert if with empty consequent: if (a) {} else { b(); } → if (!a) { b(); }
-        if (isEmptyBlock(consequent) && alternate && !isEmptyBlock(alternate)) {
+        if (isEffectFreeBlock(consequent) && alternate && !isEffectFreeBlock(alternate)) {
           path.node.test = t.unaryExpression("!", path.node.test);
           path.node.consequent = alternate;
           path.node.alternate = null;
@@ -145,4 +151,13 @@ function isLiteral(node: t.Node): boolean {
 
 function isEmptyBlock(node: t.Node): boolean {
   return t.isBlockStatement(node) && node.body.length === 0;
+}
+
+/** Block is effectively empty: empty or all statements are pure literals (e.g. `{ 0; }`) */
+function isEffectFreeBlock(node: t.Node): boolean {
+  if (isEmptyBlock(node)) return true;
+  if (!t.isBlockStatement(node)) return false;
+  return node.body.every(
+    stmt => t.isExpressionStatement(stmt) && isLiteral(stmt.expression)
+  );
 }

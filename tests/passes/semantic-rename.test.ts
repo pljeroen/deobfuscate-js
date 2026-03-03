@@ -150,5 +150,52 @@ describe("R17: semantic variable renaming", () => {
       expect(match![1]).toBe("len");
       expect(match![1]).not.toBe(match![2]);
     });
+
+    it("does not rename to a name used as an unbound (global) reference", () => {
+      // _0x335d3d has array usage (.filter) → candidate "arr"
+      // But "arr" is already used as an unbound global reference.
+      // Renaming to "arr" would shadow the global, breaking the program.
+      const result = deobfuscate(`
+        function main(_0x48017a) {
+          const _0x335d3d = _0x48017a.split('');
+          arr = _0x335d3d.filter(function(_0x1, _0x2, _0x3) {
+            return _0x3.indexOf(_0x1) === _0x2;
+          }).sort();
+          tmp = func(arr);
+        }
+      `);
+      // _0x335d3d should NOT be renamed to "arr" because "arr" is a global
+      // The const declaration should not collide with the global "arr"
+      const lines = result.split('\n');
+      const constLine = lines.find(l => /const\s+\w+\s*=/.test(l));
+      expect(constLine).toBeTruthy();
+      const constName = constLine!.match(/const\s+(\w+)/)?.[1];
+      expect(constName).not.toBe("arr");
+    });
+
+    it("does not rename to a name that would cause const reassignment", () => {
+      // Pattern from p03624_1: const S = input.split(''); arr = S.filter(...)
+      // If S is renamed to "arr", then "arr = arr.filter(...)" reassigns const
+      const result = deobfuscate(`
+        function main(_0x48017a) {
+          const _0x335d3d = _0x48017a.split('');
+          alphabetList = 'abcdefghijklmnopqrstuvwxyz'.split('');
+          arr = _0x335d3d.filter(function(_0x1cf2eb, _0xe34bbd, _0x4c04b5) {
+            return _0x4c04b5.indexOf(_0x1cf2eb) === _0xe34bbd;
+          }).sort();
+          tmp = _0x18aa50(arr, alphabetList);
+          function _0x18aa50(_0xe0ba8d, _0x5bb7e1) {
+            var _0x31eeb2 = [];
+            for (var _0x7b03cd = 0; _0x7b03cd < _0xe0ba8d.length; _0x7b03cd++) {
+              _0x31eeb2[_0xe0ba8d[_0x7b03cd]] = true;
+            }
+            return _0x31eeb2;
+          }
+          console.log(tmp);
+        }
+      `);
+      // Must not have "const arr" followed by "arr = ..." (const reassignment)
+      expect(result).not.toMatch(/const\s+arr\b[\s\S]*?\barr\s*=\s*arr\./);
+    });
   });
 });

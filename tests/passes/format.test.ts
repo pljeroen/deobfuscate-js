@@ -147,6 +147,20 @@ describe("format pass", () => {
     });
   });
 
+  describe("array literals", () => {
+    it("keeps array elements on one line", () => {
+      expect(fmt("var a=[0,0,0,0]")).toBe(
+        "var a = [0, 0, 0, 0]\n"
+      );
+    });
+
+    it("keeps nested array elements on one line", () => {
+      expect(fmt("function f(){var a=[1,2,3]}")).toBe(
+        "function f() {\n  var a = [1, 2, 3]\n}\n"
+      );
+    });
+  });
+
   describe("brace attachment", () => {
     it("attaches semicolon to closing brace", () => {
       expect(fmt("var f=function(){x};")).toBe(

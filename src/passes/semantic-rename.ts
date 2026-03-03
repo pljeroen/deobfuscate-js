@@ -47,6 +47,23 @@ export const semanticRenamePass: ASTPass = {
       },
     });
 
+    // Collect free (unbound) names — identifiers used without any binding.
+    // These are implicit globals like `arr = ...` or `func(arr)`.
+    // Renaming a local to one of these would shadow the global reference.
+    const freeNames = new Set<string>();
+    traverse(ast, {
+      Identifier(path) {
+        const name = path.node.name;
+        if (isObfuscatedName(name)) return;
+        if (path.scope.hasBinding(name)) return;
+        // Skip property access names (obj.prop — "prop" is not a free variable)
+        if (t.isMemberExpression(path.parent) && path.parent.property === path.node && !path.parent.computed) return;
+        // Skip object property keys ({ key: val } — "key" is not a free variable)
+        if (t.isObjectProperty(path.parent) && path.parent.key === path.node && !path.parent.computed) return;
+        freeNames.add(name);
+      },
+    });
+
     // Track counter names assigned per function scope to avoid collisions
     // Key: function scope uid, Value: set of counter names already assigned
     const scopeCounterNames = new Map<string, Set<string>>();
@@ -114,7 +131,7 @@ export const semanticRenamePass: ASTPass = {
           t.isIdentifier(init.property) &&
           init.property.name === "length"
         ) {
-          tryAssignCandidate(path, uid, name, ["len", "length_"], scopeRenames, globalUsedNames, scopeScheduledNames);
+          tryAssignCandidate(path, uid, name, ["len", "length_"], scopeRenames, globalUsedNames, scopeScheduledNames, freeNames);
         }
       },
     });
@@ -155,25 +172,25 @@ export const semanticRenamePass: ASTPass = {
         });
 
         if (isErrorParam) {
-          tryAssignCandidate(path, uid, first.name, ["err", "error"], scopeRenames, globalUsedNames, scopeScheduledNames);
+          tryAssignCandidate(path, uid, first.name, ["err", "error"], scopeRenames, globalUsedNames, scopeScheduledNames, freeNames);
         }
       },
     });
 
     // Detect array usage: .push, .pop, .forEach, .map, .filter, .reduce, .splice, .slice
-    detectUsagePattern(ast, scopeRenames, globalUsedNames, scopeScheduledNames, isArrayUsage, ["arr", "items", "list"]);
+    detectUsagePattern(ast, scopeRenames, globalUsedNames, scopeScheduledNames, isArrayUsage, ["arr", "items", "list"], freeNames);
 
     // Detect JSON.parse result
-    detectInitPattern(ast, scopeRenames, globalUsedNames, scopeScheduledNames, isJsonParseInit, ["data", "parsed"]);
+    detectInitPattern(ast, scopeRenames, globalUsedNames, scopeScheduledNames, isJsonParseInit, ["data", "parsed"], freeNames);
 
     // Detect regex usage: assigned from regex literal, or .test/.exec called on it
-    detectUsagePattern(ast, scopeRenames, globalUsedNames, scopeScheduledNames, isRegexUsage, ["pattern", "regex"]);
+    detectUsagePattern(ast, scopeRenames, globalUsedNames, scopeScheduledNames, isRegexUsage, ["pattern", "regex"], freeNames);
 
     // Detect arithmetic-only usage
-    detectUsagePattern(ast, scopeRenames, globalUsedNames, scopeScheduledNames, isArithmeticUsage, ["num", "value"]);
+    detectUsagePattern(ast, scopeRenames, globalUsedNames, scopeScheduledNames, isArithmeticUsage, ["num", "value"], freeNames);
 
     // Detect addEventListener callback event param
-    detectEventParam(ast, scopeRenames, globalUsedNames, scopeScheduledNames);
+    detectEventParam(ast, scopeRenames, globalUsedNames, scopeScheduledNames, freeNames);
 
     // Apply renames via scope API — each binding renamed independently.
     // Guard: skip if target name already exists in the scope chain (from an earlier
@@ -317,12 +334,13 @@ function tryAssignCandidate(
   scopeRenames: Map<string, { oldName: string; newName: string }>,
   globalUsedNames: Set<string>,
   scopeScheduledNames: Map<string, Set<string>>,
+  freeNames?: Set<string>,
 ): boolean {
   const scopeKey = getScopeKey(path.scope);
   const scheduled = scopeScheduledNames.get(scopeKey) ?? new Set<string>();
 
   for (const candidate of candidates) {
-    if (path.scope.hasBinding(candidate) || scheduled.has(candidate)) {
+    if (path.scope.hasBinding(candidate) || scheduled.has(candidate) || freeNames?.has(candidate)) {
       continue;
     }
     scopeRenames.set(uid, { oldName, newName: candidate });
@@ -343,6 +361,7 @@ function detectUsagePattern(
   scopeScheduledNames: Map<string, Set<string>>,
   predicate: (binding: any) => boolean,
   candidates: string[],
+  freeNames?: Set<string>,
 ): void {
   traverse(ast, {
     VariableDeclarator(path) {
@@ -356,7 +375,7 @@ function detectUsagePattern(
       if (scopeRenames.has(uid)) return;
 
       if (predicate(binding)) {
-        tryAssignCandidate(path, uid, name, candidates, scopeRenames, globalUsedNames, scopeScheduledNames);
+        tryAssignCandidate(path, uid, name, candidates, scopeRenames, globalUsedNames, scopeScheduledNames, freeNames);
       }
     },
   });
@@ -370,6 +389,7 @@ function detectInitPattern(
   scopeScheduledNames: Map<string, Set<string>>,
   predicate: (binding: any) => boolean,
   candidates: string[],
+  freeNames?: Set<string>,
 ): void {
   traverse(ast, {
     VariableDeclarator(path) {
@@ -383,7 +403,7 @@ function detectInitPattern(
       if (scopeRenames.has(uid)) return;
 
       if (predicate(binding)) {
-        tryAssignCandidate(path, uid, name, candidates, scopeRenames, globalUsedNames, scopeScheduledNames);
+        tryAssignCandidate(path, uid, name, candidates, scopeRenames, globalUsedNames, scopeScheduledNames, freeNames);
       }
     },
   });
@@ -395,6 +415,7 @@ function detectEventParam(
   scopeRenames: Map<string, { oldName: string; newName: string }>,
   globalUsedNames: Set<string>,
   scopeScheduledNames: Map<string, Set<string>>,
+  freeNames?: Set<string>,
 ): void {
   traverse(ast, {
     CallExpression(path) {
@@ -420,7 +441,7 @@ function detectEventParam(
       const uid = `${param.name}@${binding.identifier.start}`;
       if (scopeRenames.has(uid)) return;
 
-      tryAssignCandidate(handlerPath, uid, param.name, ["event", "evt"], scopeRenames, globalUsedNames, scopeScheduledNames);
+      tryAssignCandidate(handlerPath, uid, param.name, ["event", "evt"], scopeRenames, globalUsedNames, scopeScheduledNames, freeNames);
     },
   });
 }

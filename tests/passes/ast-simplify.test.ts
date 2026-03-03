@@ -147,11 +147,35 @@ describe("AST simplify pass", () => {
       expect(result).not.toContain("else");
     });
 
+    it("removes else block with only pure literal", () => {
+      const result = simplify("if (a) { b(); } else { 0; }");
+      expect(result).not.toContain("else");
+      expect(result).toContain("if (a)");
+      expect(result).toContain("b()");
+    });
+
     it("inverts if with empty consequent and non-empty alternate", () => {
       const result = simplify("if (a) {} else { b(); }");
       expect(result).toContain("if (!a)");
       expect(result).toContain("b()");
       expect(result).not.toContain("else");
+    });
+
+    it("inverts if with pure-literal consequent and non-empty alternate", () => {
+      const result = simplify("if (a) { 0; } else { b(); }");
+      expect(result).toContain("if (!a)");
+      expect(result).toContain("b()");
+      expect(result).not.toContain("else");
+    });
+  });
+
+  describe("ternary with pure alternate", () => {
+    it("drops pure literal alternate from ternary conversion", () => {
+      const result = simplify("a ? b() : 0;");
+      expect(result).toContain("if (a)");
+      expect(result).toContain("b()");
+      expect(result).not.toContain("else");
+      expect(result).not.toContain("0");
     });
   });
 });

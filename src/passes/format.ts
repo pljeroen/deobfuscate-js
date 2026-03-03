@@ -95,6 +95,7 @@ export const formatPass: DeobfuscationPass = {
     let depth = 0;
     let lineStart = true;
     let parenDepth = 0;
+    let bracketDepth = 0;
     let inForHeader = false;
     let ternaryDepth = 0;
     const ternaryStack: number[] = [];
@@ -196,6 +197,19 @@ export const formatPass: DeobfuscationPass = {
             continue;
           }
 
+          case "[": {
+            bracketDepth++;
+            emitIndent();
+            emit("[");
+            continue;
+          }
+
+          case "]": {
+            bracketDepth--;
+            emit("]");
+            continue;
+          }
+
           case ";": {
             emit(";");
             if (!inForHeader) {
@@ -208,7 +222,7 @@ export const formatPass: DeobfuscationPass = {
 
           case ",": {
             emit(",");
-            if (depth > 0 && parenDepth === 0) {
+            if (depth > 0 && parenDepth === 0 && bracketDepth === 0) {
               newline();
             } else {
               emit(" ");
