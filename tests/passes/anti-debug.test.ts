@@ -220,6 +220,133 @@ describe("anti-debug removal", () => {
     });
   });
 
+  describe("R1: standalone IIFE with anti-debug patterns", () => {
+    it("removes standalone IIFE containing init/chain/input directly", () => {
+      const result = ad(`
+        (function() {
+          var _0x1234 = _0xfn("init");
+          if (!new RegExp("function *\\\\( *\\\\)").test(_0x1234 + "chain") ||
+              !new RegExp("\\\\+\\\\+").test(_0x1234 + "input")) {
+            _0x1234("0");
+          }
+        })();
+        console.log("keep");
+      `);
+      expect(result).not.toContain("init");
+      expect(result).not.toContain("chain");
+      expect(result).not.toContain("input");
+      expect(result).toContain("keep");
+    });
+
+    it("removes two-part wrapper+IIFE with init/chain/input (C77-0 pattern)", () => {
+      // Part 1: wrapper factory (once-caller)
+      // Part 2: standalone IIFE calling wrapper(this, fn) where fn has init/chain/input
+      const result = ad(`
+        var _0x54b02b = function() {
+          var _0xd4b0bb = true;
+          return function(_0x3bd3f8, _0x103969) {
+            var _0x37db5f = _0xd4b0bb ? function() {
+              if (_0x103969) {
+                var _0x590205 = _0x103969.apply(_0x3bd3f8, arguments);
+                _0x103969 = null;
+                return _0x590205;
+              }
+            } : function() {};
+            _0xd4b0bb = false;
+            return _0x37db5f;
+          };
+        }();
+        (function() {
+          _0x54b02b(this, function() {
+            var _0x448915 = new RegExp("function *\\\\( *\\\\)");
+            var _0x2e1212 = new RegExp("\\\\+\\\\+ *(?:[a-zA-Z_$][0-9a-zA-Z_$]*)", "i");
+            var _0x293df7 = _0x25c477("init");
+            if (!_0x448915.test(_0x293df7 + "chain") || !_0x2e1212.test(_0x293df7 + "input")) {
+              _0x293df7("0");
+            }
+          })();
+        })();
+        console.log("keep");
+      `);
+      expect(result).not.toContain("init");
+      expect(result).not.toContain("chain");
+      expect(result).not.toContain("input");
+      expect(result).not.toContain("_0x54b02b");
+      expect(result).toContain("keep");
+    });
+
+    it("removes standalone IIFE with (((.+)+)+)+$ regex", () => {
+      const result = ad(`
+        (function() {
+          return _0x1234.toString().search("(((.+)+)+)+$")
+            .toString().constructor(_0x1234).search("(((.+)+)+)+$");
+        })();
+        console.log("keep");
+      `);
+      expect(result).not.toContain("(((.+)+)+)+$");
+      expect(result).toContain("keep");
+    });
+
+    it("removes standalone IIFE with console override", () => {
+      const result = ad(`
+        (function() {
+          var methods = ["log", "warn", "info", "error", "exception", "table", "trace"];
+          for (var i = 0; i < methods.length; i++) {
+            console[methods[i]] = function() {};
+          }
+        })();
+        console.log("keep");
+      `);
+      expect(result).not.toContain("exception");
+      expect(result).toContain("keep");
+    });
+
+    it("preserves standalone IIFE without anti-debug patterns", () => {
+      const result = ad(`
+        (function() {
+          console.log("business logic");
+        })();
+        console.log("keep");
+      `);
+      expect(result).toContain("business logic");
+      expect(result).toContain("keep");
+    });
+
+    it("preserves business logic after removing two-part anti-debug", () => {
+      const result = ad(`
+        var _0x54b02b = function() {
+          var _0xd4b0bb = true;
+          return function(_0x3bd3f8, _0x103969) {
+            var _0x37db5f = _0xd4b0bb ? function() {
+              if (_0x103969) {
+                var _0x590205 = _0x103969.apply(_0x3bd3f8, arguments);
+                _0x103969 = null;
+                return _0x590205;
+              }
+            } : function() {};
+            _0xd4b0bb = false;
+            return _0x37db5f;
+          };
+        }();
+        (function() {
+          _0x54b02b(this, function() {
+            var _0x293df7 = _0x25c477("init");
+            if (!new RegExp("function *\\\\( *\\\\)").test(_0x293df7 + "chain") ||
+                !new RegExp("\\\\+\\\\+").test(_0x293df7 + "input")) {
+              _0x293df7("0");
+            }
+          })();
+        })();
+        var x = 42;
+        console.log(x);
+      `);
+      expect(result).not.toContain("init");
+      expect(result).not.toContain("_0x54b02b");
+      expect(result).toContain("42");
+      expect(result).toContain("console.log");
+    });
+  });
+
   describe("RC2: self-defending init/chain/input pattern", () => {
     it("removes self-defending guard with init/chain/input strings", () => {
       const result = ad(`

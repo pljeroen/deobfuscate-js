@@ -70,6 +70,30 @@ export const antiDebugPass: ASTPass = {
       },
     });
 
+    // Phase 2b: Remove standalone ExpressionStatements containing anti-debug patterns.
+    // Handles the C77-0 two-part pattern where wrapper(this, fn)() has init/chain/input
+    // inside fn, and standalone IIFEs whose own body (shallow) contains anti-debug patterns.
+    traverse(ast, {
+      ExpressionStatement(path) {
+        const expr = path.node.expression;
+        if (!t.isCallExpression(expr)) return;
+
+        // Case A: Direct call with anti-debug function arg (not an IIFE)
+        // e.g., wrapper(this, function() { ...init/chain/input... })()
+        if (isCallWithAntiDebugArg(expr)) {
+          path.remove();
+          return;
+        }
+
+        // Case B: IIFE whose body is purely anti-debug
+        const fn = extractIIFEFunction(expr);
+        if (!fn) return;
+        if (isAntiDebugIIFE(fn)) {
+          path.remove();
+        }
+      },
+    });
+
     // Phase 3: Remove calls/references to removed names — direct calls, setInterval, IIFEs containing them
     // Also handles SequenceExpressions (comma operator) by filtering individual sub-expressions.
     let changed = true;
@@ -429,6 +453,148 @@ function isSelfDefendingInitChainInput(fn: t.FunctionExpression | t.ArrowFunctio
     }
   }
 
+  walk(body);
+  return hasInit && hasChain && hasInput;
+}
+
+/**
+ * Extract the FunctionExpression from an IIFE call expression.
+ * Handles: (function(){...})(), (function(){...}()), and nested calls like (function(){...})()()
+ */
+function extractIIFEFunction(expr: t.CallExpression): t.FunctionExpression | t.ArrowFunctionExpression | null {
+  const callee = expr.callee;
+  if (t.isFunctionExpression(callee) || t.isArrowFunctionExpression(callee)) {
+    return callee;
+  }
+  // Nested call: (function(){...})()() — the outer callee is itself a CallExpression
+  if (t.isCallExpression(callee)) {
+    const inner = callee.callee;
+    if (t.isFunctionExpression(inner) || t.isArrowFunctionExpression(inner)) {
+      return inner;
+    }
+  }
+  return null;
+}
+
+/**
+ * Check if a call expression has a function argument containing anti-debug patterns.
+ * Unwraps nested calls: fn(this, callback)() checks callback.
+ */
+function isCallWithAntiDebugArg(call: t.CallExpression): boolean {
+  if (hasAntiDebugFunctionArg(call)) return true;
+  // Unwrap nested call: fn(this, callback)()
+  if (t.isCallExpression(call.callee)) {
+    return hasAntiDebugFunctionArg(call.callee);
+  }
+  return false;
+}
+
+function hasAntiDebugFunctionArg(call: t.CallExpression): boolean {
+  for (const arg of call.arguments) {
+    if (!t.isFunctionExpression(arg) && !t.isArrowFunctionExpression(arg)) continue;
+    if (containsString(arg, "(((.+)+)+)+$") || isConsoleOverride(arg) || isSelfDefendingInitChainInput(arg)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Check if an IIFE body is purely anti-debug (safe to remove entirely).
+ * Two checks:
+ * 1. Every statement is a call with anti-debug function argument (two-part C77-0 pattern)
+ * 2. The IIFE body itself (shallow, without recursing into nested functions) is anti-debug
+ */
+function isAntiDebugIIFE(fn: t.FunctionExpression | t.ArrowFunctionExpression): boolean {
+  const body = t.isBlockStatement(fn.body) ? fn.body : null;
+  if (!body || body.body.length === 0) return false;
+
+  // Check 1: every statement is a call with anti-debug function arg
+  if (body.body.every(stmt =>
+    t.isExpressionStatement(stmt) &&
+    t.isCallExpression(stmt.expression) &&
+    isCallWithAntiDebugArg(stmt.expression)
+  )) {
+    return true;
+  }
+
+  // Check 2: shallow anti-debug pattern directly in IIFE body
+  // Uses shallow walk that does NOT recurse into nested function expressions
+  return shallowContainsString(fn, "(((.+)+)+)+$") ||
+    shallowIsConsoleOverride(fn) ||
+    shallowIsSelfDefendingInitChainInput(fn);
+}
+
+/** Like containsString but stops at nested function boundaries */
+function shallowContainsString(fn: t.FunctionExpression | t.ArrowFunctionExpression, target: string): boolean {
+  const body = t.isBlockStatement(fn.body) ? fn.body : null;
+  if (!body) return false;
+  let found = false;
+  function walk(node: t.Node): void {
+    if (found) return;
+    if (t.isFunctionExpression(node) || t.isArrowFunctionExpression(node)) return;
+    if (t.isFunctionDeclaration(node)) return;
+    if (t.isStringLiteral(node) && node.value === target) { found = true; return; }
+    for (const key of t.VISITOR_KEYS[node.type] || []) {
+      const child = (node as any)[key];
+      if (Array.isArray(child)) { for (const c of child) { if (t.isNode(c)) walk(c); } }
+      else if (t.isNode(child)) { walk(child); }
+    }
+  }
+  walk(body);
+  return found;
+}
+
+/** Like isConsoleOverride but stops at nested function boundaries */
+function shallowIsConsoleOverride(fn: t.FunctionExpression | t.ArrowFunctionExpression): boolean {
+  const body = t.isBlockStatement(fn.body) ? fn.body : null;
+  if (!body) return false;
+  let hasMethodArray = false;
+  let hasConsoleAssign = false;
+  function walk(node: t.Node): void {
+    if (hasMethodArray && hasConsoleAssign) return;
+    if (t.isFunctionExpression(node) || t.isArrowFunctionExpression(node)) return;
+    if (t.isFunctionDeclaration(node)) return;
+    if (t.isArrayExpression(node)) {
+      const strs = node.elements.filter((el): el is t.StringLiteral => t.isStringLiteral(el)).map(el => el.value);
+      if (strs.includes("log") && strs.includes("warn") && strs.includes("info") && strs.includes("error")) {
+        hasMethodArray = true;
+      }
+    }
+    if (t.isAssignmentExpression(node) && t.isMemberExpression(node.left) &&
+        t.isIdentifier(node.left.object) && node.left.object.name === "console") {
+      hasConsoleAssign = true;
+    }
+    for (const key of t.VISITOR_KEYS[node.type] || []) {
+      const child = (node as any)[key];
+      if (Array.isArray(child)) { for (const c of child) { if (t.isNode(c)) walk(c); } }
+      else if (t.isNode(child)) { walk(child); }
+    }
+  }
+  walk(body);
+  return hasMethodArray && hasConsoleAssign;
+}
+
+/** Like isSelfDefendingInitChainInput but stops at nested function boundaries */
+function shallowIsSelfDefendingInitChainInput(fn: t.FunctionExpression | t.ArrowFunctionExpression): boolean {
+  const body = t.isBlockStatement(fn.body) ? fn.body : null;
+  if (!body) return false;
+  let hasInit = false, hasChain = false, hasInput = false;
+  function walk(node: t.Node): void {
+    if (hasInit && hasChain && hasInput) return;
+    if (t.isFunctionExpression(node) || t.isArrowFunctionExpression(node)) return;
+    if (t.isFunctionDeclaration(node)) return;
+    if (t.isStringLiteral(node)) {
+      if (node.value === "init") hasInit = true;
+      if (node.value === "chain") hasChain = true;
+      if (node.value === "input") hasInput = true;
+    }
+    for (const key of t.VISITOR_KEYS[node.type] || []) {
+      const child = (node as any)[key];
+      if (Array.isArray(child)) { for (const c of child) { if (t.isNode(c)) walk(c); } }
+      else if (t.isNode(child)) { walk(child); }
+    }
+  }
   walk(body);
   return hasInit && hasChain && hasInput;
 }
