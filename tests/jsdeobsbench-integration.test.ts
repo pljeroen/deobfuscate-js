@@ -1,23 +1,24 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const TOOL_PY = join(__dirname, "..", "benchmarks", "jsdeobsbench", "deobfuscators", "deobfuscate_with_tool.py");
 const WRAPPER = join(__dirname, "..", "scripts", "deobfuscate-js.sh");
+const hasBenchData = existsSync(TOOL_PY);
 
 describe("JsDeObsBench integration", () => {
-  it("deobfuscate_with_tool.py has deobfuscate-js function", () => {
+  it.skipIf(!hasBenchData)("deobfuscate_with_tool.py has deobfuscate-js function", () => {
     const py = readFileSync(TOOL_PY, "utf-8");
     expect(py).toContain("def deobfuscate_with_deobfuscatejs(dataset_jsonl_path):");
   });
 
-  it("deobfuscate_with_tool.py dispatches to deobfuscate-js", () => {
+  it.skipIf(!hasBenchData)("deobfuscate_with_tool.py dispatches to deobfuscate-js", () => {
     const py = readFileSync(TOOL_PY, "utf-8");
     expect(py).toContain('elif deobfuscator == "deobfuscate-js":');
     expect(py).toContain("deobfuscate_with_deobfuscatejs(dataset_jsonl_path)");
   });
 
-  it("deobfuscate_with_tool.py references our wrapper script", () => {
+  it.skipIf(!hasBenchData)("deobfuscate_with_tool.py references our wrapper script", () => {
     const py = readFileSync(TOOL_PY, "utf-8");
     expect(py).toContain("deobfuscate-js.sh");
   });
