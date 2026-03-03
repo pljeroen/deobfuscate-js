@@ -347,6 +347,165 @@ describe("anti-debug removal", () => {
     });
   });
 
+  describe("RC3: business-logic functions with dead-code-injected nested FunctionDeclaration traps", () => {
+    it("preserves business-logic function when constructor trap is in nested FunctionDeclaration", () => {
+      // C77-0 deadcode-injection pattern: a nested FunctionDeclaration inside a business
+      // logic function contains .constructor("debugger"). The outer function must survive.
+      const result = ad(`
+        function BFS(x) {
+          var queue = [[x, 0]];
+          function _0xhelper(_0xarg) {
+            if (typeof _0xarg === "string") {
+              return function() {}["constructor"]("while (true) {}")["apply"]("counter");
+            } else {
+              (function() { return true; })["constructor"]("debugger")["call"]("action");
+            }
+            _0xhelper(++_0xarg);
+          }
+          while (queue.length > 0) {
+            var item = queue.shift();
+            if (item[0] === "done") return item[1];
+          }
+          return -1;
+        }
+        BFS("start");
+      `);
+      // BFS must survive — it contains business logic (queue, while loop)
+      expect(result).toContain("BFS");
+      expect(result).toContain("queue");
+    });
+
+    it("preserves main function with nested FunctionDeclaration containing constructor trap", () => {
+      const result = ad(`
+        function main(_0x1234) {
+          function _0xdebugTrap(_0xarg) {
+            (function(){})["constructor"]("debugger")["apply"]("stateObject");
+          }
+          var lines = _0x1234.split("\\n");
+          console.log(lines[0]);
+        }
+        main("hello\\nworld");
+      `);
+      expect(result).toContain("main");
+      expect(result).toContain("lines");
+      expect(result).toContain("console.log");
+    });
+  });
+
+  describe("RC4: dead-code-injected anti-debug patterns in nested functions", () => {
+    it("preserves callback with init/chain/input injected inside nested function dead branch", () => {
+      // Dead-code injection injects anti-debug strings ("init", "chain", "input")
+      // into dead branches of business-logic functions. The shallow anti-debug detection
+      // must NOT recurse into nested functions.
+      const result = ad(`
+        process.stdin.on("data", function (_0x4fdcc9) {
+          var _0x4bf796 = _0x4fdcc9.trim().split("\\n");
+          function _0x2236e2(_0x2d1d50) {
+            var _0x2681a3 = { 'cFZRs': "init", 'LkmGC': "input" };
+            if ("SPnyp" !== "WgkDE") {
+              var _0x2891e7 = _0x2d1d50.split(" ");
+              return parseInt(_0x2891e7[0]) + parseInt(_0x2891e7[1]);
+            } else {
+              var _0x29af67 = _0x29bf59(_0x2681a3["cFZRs"]);
+              if (!_0x5c2bec.test(_0x29af67 + "chain")) { _0x29af67("0"); }
+            }
+          }
+          console.log(_0x4bf796.map(_0x2236e2).join("\\n"));
+        });
+      `);
+      expect(result).toContain("process.stdin.on");
+      expect(result).toContain("parseInt");
+      expect(result).toContain("console.log");
+    });
+
+    it("preserves method call with anti-debug patterns in nested function argument", () => {
+      // Even if a callback argument has anti-debug strings deep inside nested functions,
+      // the outer call (e.g., .on(), .forEach()) should not be removed.
+      const result = ad(`
+        arr.forEach(function(_0xitem) {
+          function _0xprocess(_0xval) {
+            var _0xobj = { 'key': "init" };
+            if (true) {
+              return _0xval * 2;
+            } else {
+              var _0xfn = _0xhelper(_0xobj["key"]);
+              _0xfn.test(_0xfn + "chain");
+              _0xfn.test(_0xfn + "input");
+            }
+          }
+          console.log(_0xprocess(_0xitem));
+        });
+      `);
+      expect(result).toContain("arr.forEach");
+      expect(result).toContain("_0xval * 2");
+    });
+  });
+
+  describe("RC5: preserve side effects when removing unreferenced _0x variables", () => {
+    it("preserves .shift() call when variable result is unused", () => {
+      // Phase 4 removes unreferenced _0x-named variables. But when the initializer
+      // has side effects (like .shift() which modifies the array), the side effect
+      // must be preserved as an ExpressionStatement.
+      const result = ad(`
+        function _0xdebug(x) {
+          (function(){}).constructor("debugger").apply("stateObject");
+        }
+        _0xdebug();
+        'use strict';
+        const main = _0x521f13 => {
+          const _0x48f361 = _0x521f13.trim().split("\\n");
+          const _0x150879 = _0x48f361["shift"]();
+          _0x48f361.forEach(_0x249e7c => {
+            console.log(_0x249e7c);
+          });
+        };
+        main(require('fs').readFileSync("/dev/stdin", "utf8"));
+      `);
+      // Anti-debug patterns should be removed
+      expect(result).not.toContain("debugger");
+      // The .shift() call must survive (as expression statement) — it modifies the array
+      expect(result).toContain("shift");
+      // Business logic must survive
+      expect(result).toContain("forEach");
+      expect(result).toContain("console.log");
+    });
+
+    it("preserves Number(arr.shift()) when wrapping variable is unused", () => {
+      // _0x13a7e6 is never referenced, but Number(_0x1cdbd9["shift"]()) contains
+      // a .shift() side effect that must survive.
+      const result = ad(`
+        function _0xdebug(x) {
+          (function(){}).constructor("debugger").apply("stateObject");
+        }
+        _0xdebug();
+        const main = _0x521f13 => {
+          const _0x1cdbd9 = _0x521f13.trim().split("\\n");
+          const _0x13a7e6 = Number(_0x1cdbd9["shift"]());
+          _0x1cdbd9.forEach(x => console.log(x));
+        };
+        main(require('fs').readFileSync("/dev/stdin", "utf8"));
+      `);
+      expect(result).not.toContain("debugger");
+      // The shift() call must survive even though _0x13a7e6 is unused
+      expect(result).toContain("shift");
+      expect(result).toContain("forEach");
+    });
+
+    it("still removes unreferenced _0x variables without side effects", () => {
+      const result = ad(`
+        function _0xdebug(x) {
+          (function(){}).constructor("debugger").apply("stateObject");
+        }
+        _0xdebug();
+        const _0xabcdef = 42;
+        console.log("keep");
+      `);
+      expect(result).not.toContain("debugger");
+      expect(result).not.toContain("_0xabcdef");
+      expect(result).toContain("keep");
+    });
+  });
+
   describe("RC2: self-defending init/chain/input pattern", () => {
     it("removes self-defending guard with init/chain/input strings", () => {
       const result = ad(`

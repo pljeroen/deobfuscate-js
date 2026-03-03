@@ -78,7 +78,10 @@ export const deadCodeEliminatePass: ASTPass = {
 
         for (let i = 0; i < body.length; i++) {
           if (foundTerminator) {
-            toRemove.push(i);
+            // FunctionDeclarations are hoisted — they're available before the return
+            if (!t.isFunctionDeclaration(body[i])) {
+              toRemove.push(i);
+            }
             continue;
           }
           const stmt = body[i];

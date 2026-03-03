@@ -34,6 +34,28 @@ export const antiDebugPass: ASTPass = {
       },
     });
 
+    // Phase 1b: Cascade-remove obfuscated wrapper functions whose body is purely anti-debug boilerplate.
+    // After Phase 1 removes nested anti-debug FunctionDeclarations (e.g., _0x42a16e), the parent
+    // wrapper (e.g., _0x565abf) may only contain a try/catch calling the removed helper.
+    // Uses strict structural check: only removes if body consists exclusively of try/catch,
+    // if/else, calls to removed names, and returns of removed names. No arithmetic, no loops,
+    // no property access — those indicate business logic.
+    let phase1bChanged = true;
+    while (phase1bChanged) {
+      phase1bChanged = false;
+      traverse(ast, {
+        FunctionDeclaration(path) {
+          if (!path.node.id || !t.isIdentifier(path.node.id)) return;
+          if (!isObfuscatedName(path.node.id.name)) return;
+          if (isOnlyAntiDebugBoilerplate(path.node.body, removedNames)) {
+            removedNames.add(path.node.id.name);
+            path.remove();
+            phase1bChanged = true;
+          }
+        },
+      });
+    }
+
     // Phase 2: Remove self-defending guards — var x = factory(this, function() { ...(((.+)+)+)+$... }); x();
     // Also handles multi-declarator var statements
     traverse(ast, {
@@ -42,10 +64,12 @@ export const antiDebugPass: ASTPass = {
         if (!t.isCallExpression(path.node.init)) return;
 
         // Check if any argument function contains the self-defending regex, console override,
-        // or the init/chain/input self-defending pattern
+        // or the init/chain/input self-defending pattern.
+        // Uses shallow versions that stop at nested function boundaries to avoid
+        // false positives from dead-code-injected patterns in nested functions.
         for (const arg of path.node.init.arguments) {
           if (!t.isFunctionExpression(arg) && !t.isArrowFunctionExpression(arg)) continue;
-          if (containsString(arg, "(((.+)+)+)+$") || isConsoleOverride(arg) || isSelfDefendingInitChainInput(arg)) {
+          if (shallowContainsString(arg, "(((.+)+)+)+$") || shallowIsConsoleOverride(arg) || shallowIsSelfDefendingInitChainInput(arg)) {
             const name = path.node.id.name;
             removedNames.add(name);
             // Remove the subsequent call: name()
@@ -132,6 +156,8 @@ export const antiDebugPass: ASTPass = {
 
     // Phase 4: Remove dead obfuscation artifacts — unreferenced _0x-named function/variable declarations
     // Only removes obfuscation-pattern names to avoid accidentally deleting business logic.
+    // When the initializer has side effects (method calls like .shift()), preserves the
+    // expression as an ExpressionStatement instead of removing it entirely.
     changed = true;
     let phase4iters = 0;
     while (changed && phase4iters < 10) {
@@ -162,7 +188,15 @@ export const antiDebugPass: ASTPass = {
           // Never remove the LHS of for-in/for-of — iteration variable is structurally required
           const grandparent = varDecl.parentPath;
           if (grandparent?.isForInStatement() || grandparent?.isForOfStatement()) return;
-          if (varDecl.node.declarations.length === 1) {
+          // If the initializer has side effects, preserve as ExpressionStatement
+          const init = path.node.init;
+          if (init && hasSideEffects(init, removedNames)) {
+            if (varDecl.node.declarations.length === 1) {
+              varDecl.replaceWith(t.expressionStatement(init));
+            } else {
+              return; // multi-declarator with side effects — leave it
+            }
+          } else if (varDecl.node.declarations.length === 1) {
             varDecl.remove();
           } else {
             path.remove();
@@ -177,18 +211,18 @@ export const antiDebugPass: ASTPass = {
 };
 
 /**
- * Check if a function body contains .constructor("debugger") or .constructor("while (true) {}")
- * Only traverses into nested FunctionDeclarations (dedicated anti-debug helpers), NOT into
- * FunctionExpressions/ArrowFunctionExpressions (which may contain injected dead-code traps
- * inside business-logic functions like Main).
+ * Check if a function body DIRECTLY contains .constructor("debugger") or .constructor("while (true) {}")
+ * Skips ALL nested function boundaries (FunctionExpression, ArrowFunctionExpression, FunctionDeclaration)
+ * because dead-code injection can inject constructor traps inside nested functions within
+ * business-logic code. Only traps at the function's own body level count.
  */
 function containsConstructorTrap(path: NodePath<t.FunctionDeclaration>): boolean {
   let found = false;
   path.traverse({
-    // Skip nested function expressions — they may contain dead-code injected traps
-    // that don't make the enclosing function an anti-debug function
+    // Skip all nested function boundaries — traps inside them don't make the outer function anti-debug
     FunctionExpression(p) { p.skip(); },
     ArrowFunctionExpression(p) { p.skip(); },
+    FunctionDeclaration(p) { p.skip(); },
     StringLiteral(innerPath) {
       if (found) return;
       const val = innerPath.node.value;
@@ -417,8 +451,93 @@ function nodeReferencesAny(node: t.Node, names: Set<string>): boolean {
   return found;
 }
 
+/**
+ * Strict structural check: is the function body purely anti-debug boilerplate?
+ * Only returns true if EVERY statement is one of:
+ * - ExpressionStatement calling a removed name
+ * - ReturnStatement returning a removed name (or nothing)
+ * - IfStatement where both branches are recursively boilerplate
+ * - TryStatement where both try/catch blocks are recursively boilerplate
+ * Any other statement type (loops, assignments, arithmetic, property access) → false.
+ * This prevents incorrectly removing functions that have business logic using only params + literals.
+ */
+function isOnlyAntiDebugBoilerplate(body: t.BlockStatement, removedNames: Set<string>): boolean {
+  // Filter out remaining FunctionDeclarations (shouldn't be any after Phase 1, but be safe)
+  const stmts = body.body.filter(s => !t.isFunctionDeclaration(s));
+  if (stmts.length === 0) return true;
+  return stmts.every(stmt => isBoilerplateStmt(stmt, removedNames));
+}
+
+function isBoilerplateStmt(node: t.Statement, removedNames: Set<string>): boolean {
+  if (t.isExpressionStatement(node)) {
+    return isCallToRemovedName(node.expression, removedNames);
+  }
+  if (t.isReturnStatement(node)) {
+    if (!node.argument) return true;
+    return t.isIdentifier(node.argument) && removedNames.has(node.argument.name);
+  }
+  if (t.isIfStatement(node)) {
+    const consStmts = t.isBlockStatement(node.consequent)
+      ? node.consequent.body : [node.consequent];
+    const altStmts = node.alternate
+      ? (t.isBlockStatement(node.alternate) ? node.alternate.body : [node.alternate])
+      : [];
+    return consStmts.every(s => isBoilerplateStmt(s, removedNames)) &&
+           altStmts.every(s => isBoilerplateStmt(s, removedNames));
+  }
+  if (t.isTryStatement(node)) {
+    const tryOk = node.block.body.every(s => isBoilerplateStmt(s, removedNames));
+    const catchOk = !node.handler || node.handler.body.body.every(s => isBoilerplateStmt(s, removedNames));
+    return tryOk && catchOk;
+  }
+  if (t.isEmptyStatement(node)) return true;
+  // Any other statement type (VariableDeclaration, WhileStatement, ForStatement,
+  // AssignmentExpression, etc.) indicates business logic
+  return false;
+}
+
+function isCallToRemovedName(expr: t.Expression, removedNames: Set<string>): boolean {
+  return t.isCallExpression(expr) &&
+    t.isIdentifier(expr.callee) &&
+    removedNames.has(expr.callee.name);
+}
+
 function isObfuscatedName(name: string): boolean {
   return /_0x[0-9a-f]+$/i.test(name);
+}
+
+/**
+ * Check if an expression might have side effects.
+ * Returns true for CallExpression, NewExpression, AssignmentExpression, UpdateExpression,
+ * UNLESS the call is:
+ * - purely to a removed anti-debug name (which no longer exists)
+ * - an IIFE (callee is FunctionExpression/ArrowFunctionExpression) — self-contained
+ */
+function hasSideEffects(node: t.Node, removedNames: Set<string>): boolean {
+  if (t.isCallExpression(node)) {
+    // Direct call to a removed name — the function was deleted, no side effects
+    if (t.isIdentifier(node.callee) && removedNames.has(node.callee.name)) {
+      return false;
+    }
+    // IIFE — self-contained, the result is what gets assigned
+    if (t.isFunctionExpression(node.callee) || t.isArrowFunctionExpression(node.callee)) {
+      return false;
+    }
+    return true;
+  }
+  if (t.isNewExpression(node)) return true;
+  if (t.isAssignmentExpression(node) || t.isUpdateExpression(node)) return true;
+  for (const key of t.VISITOR_KEYS[node.type] || []) {
+    const child = (node as any)[key];
+    if (Array.isArray(child)) {
+      for (const c of child) {
+        if (t.isNode(c) && hasSideEffects(c, removedNames)) return true;
+      }
+    } else if (t.isNode(child)) {
+      if (hasSideEffects(child, removedNames)) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -492,7 +611,11 @@ function isCallWithAntiDebugArg(call: t.CallExpression): boolean {
 function hasAntiDebugFunctionArg(call: t.CallExpression): boolean {
   for (const arg of call.arguments) {
     if (!t.isFunctionExpression(arg) && !t.isArrowFunctionExpression(arg)) continue;
-    if (containsString(arg, "(((.+)+)+)+$") || isConsoleOverride(arg) || isSelfDefendingInitChainInput(arg)) {
+    // Use shallow versions that stop at nested function boundaries.
+    // Dead-code injection can inject anti-debug strings ("init", "chain", "input")
+    // into nested functions within business-logic callbacks. Deep walking would
+    // false-positive on those injected patterns.
+    if (shallowContainsString(arg, "(((.+)+)+)+$") || shallowIsConsoleOverride(arg) || shallowIsSelfDefendingInitChainInput(arg)) {
       return true;
     }
   }

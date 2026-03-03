@@ -46,8 +46,9 @@ if (!inputPath || !outputPath) {
 const allASTPasses: ASTPass[] = [
   bundlerUnpackPass, constantFoldPass, constantPropagatePass, deadCodeEliminatePass,
   hexDecodePass, stringArrayStaticPass, stringArrayPass, controlFlowObjectPass,
-  controlFlowUnflattenPass, antiDebugPass, constantPropagatePass, deadCodeEliminatePass,
-  astSimplifyPass, semanticRenamePass, astRenamePass,
+  controlFlowUnflattenPass, constantFoldPass, deadCodeEliminatePass, antiDebugPass,
+  constantPropagatePass, deadCodeEliminatePass, astSimplifyPass, semanticRenamePass,
+  astRenamePass,
 ];
 
 const astPasses = unsafeMode ? allASTPasses : filterSafePasses(allASTPasses);

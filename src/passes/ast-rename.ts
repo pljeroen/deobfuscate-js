@@ -80,6 +80,17 @@ export const astRenamePass: ASTPass = {
           },
         });
 
+        // Collect names bound in descendant scopes to avoid shadowing
+        const descendantNames = new Set<string>();
+        path.traverse({
+          Scope(scopePath) {
+            if (scopePath === path) return;
+            for (const bName of Object.keys(scopePath.scope.bindings)) {
+              descendantNames.add(bName);
+            }
+          },
+        });
+
         // Collect all bindings in this scope that need renaming
         const bindings = scope.bindings;
 
@@ -93,7 +104,7 @@ export const astRenamePass: ASTPass = {
               ? DESCRIPTIVE_NAMES[nameIdx]
               : `var${nameIdx - DESCRIPTIVE_NAMES.length + 1}`;
             nameIdx++;
-          } while (scope.hasBinding(newName) || GLOBALS.has(newName) || unboundNames.has(newName));
+          } while (scope.hasBinding(newName) || GLOBALS.has(newName) || unboundNames.has(newName) || descendantNames.has(newName));
 
           // Use Babel's scope.rename for safe, correct renaming
           scope.rename(name, newName);

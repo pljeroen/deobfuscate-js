@@ -98,4 +98,45 @@ describe("dead code elimination", () => {
       expect(result).toContain("x + 2");
     });
   });
+
+  describe("hoisted function declarations after return", () => {
+    it("preserves FunctionDeclaration after return in IIFE", () => {
+      const result = dce(`
+        (function(data) {
+          return data.map(stdev).join("\\n");
+          function stdev(scores) {
+            return scores.reduce(sum) / scores.length;
+          }
+          function sum(a, b) {
+            return a + b;
+          }
+        })(input);
+      `);
+      // FunctionDeclarations are hoisted — must survive even after return
+      expect(result).toContain("stdev");
+      expect(result).toContain("sum");
+    });
+
+    it("still removes non-hoisted statements after return", () => {
+      const result = dce(`
+        function f() {
+          return 1;
+          var x = 2;
+          console.log("dead");
+        }
+      `);
+      expect(result).not.toContain("dead");
+      expect(result).not.toContain("var x");
+    });
+
+    it("preserves FunctionDeclaration after throw", () => {
+      const result = dce(`
+        function f(x) {
+          throw new Error(helper(x));
+          function helper(v) { return v * 2; }
+        }
+      `);
+      expect(result).toContain("helper");
+    });
+  });
 });

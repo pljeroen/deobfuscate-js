@@ -165,6 +165,41 @@ describe("AST rename pass", () => {
     });
   });
 
+  describe("descendant scope collision", () => {
+    it("does not rename to a name already bound in a child block scope", () => {
+      // 'value' is declared in a while-body block scope
+      // _0x1234 should NOT be renamed to 'value' (first candidate)
+      const result = rename(
+        "function f(_0x1234) { while (true) { let value = 1; console.log(value); } return _0x1234; }"
+      );
+      const match = result.match(/function f\((\w+)\)/);
+      expect(match).toBeTruthy();
+      expect(match![1]).not.toBe("value");
+      // Inner 'value' binding must be preserved
+      expect(result).toContain("let value");
+    });
+
+    it("does not rename to a name already bound in a nested if-block scope", () => {
+      // 'value' is in an if-block, 'other' is in the else-block
+      const result = rename(
+        "function f(_0x1234) { if (true) { let value = 1; } else { let other = 2; } return _0x1234; }"
+      );
+      const match = result.match(/function f\((\w+)\)/);
+      expect(match).toBeTruthy();
+      expect(match![1]).not.toBe("value");
+      expect(match![1]).not.toBe("other");
+    });
+
+    it("does not rename to a name bound in a for-loop block scope", () => {
+      const result = rename(
+        "function f(_0x1234) { for (let value = 0; value < 10; value++) { console.log(value); } return _0x1234; }"
+      );
+      const match = result.match(/function f\((\w+)\)/);
+      expect(match).toBeTruthy();
+      expect(match![1]).not.toBe("value");
+    });
+  });
+
   describe("undeclared global collision", () => {
     it("does not rename to a name that collides with undeclared reference", () => {
       // 'value' is used as undeclared global, so should not be used as a rename target

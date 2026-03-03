@@ -30,7 +30,7 @@ const positionalArgs = args.filter(a => !a.startsWith("--"));
 const inputPath = positionalArgs[0] ?? resolve("input/lodash.min.js");
 const outputPath = positionalArgs[1] ?? resolve("output/lodash.deobfuscated.js");
 
-const allASTPasses: ASTPass[] = [bundlerUnpackPass, constantFoldPass, constantPropagatePass, deadCodeEliminatePass, hexDecodePass, stringArrayStaticPass, stringArrayPass, controlFlowObjectPass, controlFlowUnflattenPass, antiDebugPass, constantPropagatePass, deadCodeEliminatePass, astSimplifyPass, semanticRenamePass, astRenamePass];
+const allASTPasses: ASTPass[] = [bundlerUnpackPass, constantFoldPass, constantPropagatePass, deadCodeEliminatePass, hexDecodePass, stringArrayStaticPass, stringArrayPass, controlFlowObjectPass, controlFlowUnflattenPass, constantFoldPass, deadCodeEliminatePass, antiDebugPass, constantPropagatePass, deadCodeEliminatePass, astSimplifyPass, semanticRenamePass, astRenamePass];
 
 const astPasses = unsafeMode ? allASTPasses : filterSafePasses(allASTPasses);
 

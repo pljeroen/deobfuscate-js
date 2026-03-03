@@ -1,6 +1,6 @@
 # deobfuscate-js
 
-![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-561%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-574%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
 
 JavaScript de-obfuscation toolkit. Reverses javascript-obfuscator/obfuscator.io transforms (string array encoding, control flow flattening, proxy function objects, anti-debug traps) and handles webpack/browserify bundles. Combines AST-based transforms with token-level formatting to produce readable output from obfuscated or minified JavaScript.
 
@@ -270,7 +270,7 @@ Evaluated on [JsDeObsBench](https://github.com/nickcyran/JsDeObsBench) (9,000+ o
 
 | # | Tool | Type | Single | Combination | Combined |
 |---|---|---|---|---|---|
-| **1** | **deobfuscate-js** | Expert | **76.04** | **84.49** | **80.26** |
+| **1** | **deobfuscate-js** | Expert | **76.12** | **86.25** | **81.19** |
 | 2 | webcrack | Expert | 73.99 | 85.68 | 79.84 |
 | 3 | deepseek-chat | LLM | 75.17 | — | — |
 | 4 | GPT-4o | LLM | 73.67 | 41.68 | 57.67 |
@@ -279,15 +279,15 @@ Per-transformation breakdown (single):
 
 | Transformation | Syntax | Exe | Decomplex | CodeBLEU | Overall |
 |---|---|---|---|---|---|
-| code-compact | 100.0 | 99.9 | 1.0 | 62.4 | 65.8 |
-| control-flow-flattening | 100.0 | 99.5 | 26.7 | 70.4 | 74.1 |
-| deadcode-injection | 100.0 | 99.7 | 46.4 | 68.9 | 78.7 |
-| debug-protection | 100.0 | 99.8 | 65.8 | 70.3 | 84.0 |
-| name-obfuscation | 100.0 | 98.2 | 1.5 | 53.1 | 63.2 |
-| self-defending | 100.0 | 99.8 | 47.4 | 70.4 | 79.4 |
-| string-obfuscation | 100.0 | 98.4 | 72.2 | 76.5 | 86.8 |
+| code-compact | 100.0 | 100.0 | 1.1 | 70.4 | 67.9 |
+| control-flow-flattening | 100.0 | 99.6 | 26.6 | 70.4 | 74.2 |
+| deadcode-injection | 100.0 | 100.0 | 49.1 | 69.0 | 79.5 |
+| debug-protection | 100.0 | 100.0 | 65.8 | 70.4 | 84.0 |
+| name-obfuscation | 100.0 | 99.4 | 1.4 | 53.0 | 63.4 |
+| self-defending | 100.0 | 100.0 | 47.3 | 70.3 | 79.4 |
+| string-obfuscation | 100.0 | 100.0 | 69.2 | 68.5 | 84.4 |
 
-100% syntax validity across all transformations. Execution correctness 98-100%.
+100% syntax validity across all transformations. Execution correctness 99-100%.
 
 ### Minified JavaScript
 
@@ -305,7 +305,7 @@ Output passes `node --check` -- syntactically valid JavaScript.
 ## Testing
 
 ```bash
-npm test           # run all tests (561)
+npm test           # run all tests (574)
 npm run test:watch # watch mode
 ```
 
