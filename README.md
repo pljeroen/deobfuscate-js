@@ -266,7 +266,7 @@ Also provides `parseWithDiagnostics()` returning `{ ast, warnings }` for truncat
 
 ### JsDeObsBench Benchmark
 
-Evaluated on [JsDeObsBench](https://github.com/nickcyran/JsDeObsBench) (9,000+ obfuscated JavaScript samples across 7 transformations + combinations). Overall score is the mean of syntax validity, execution correctness, Halstead length reduction, and CodeBLEU similarity to the original source.
+Evaluated on [JsDeObsBench](https://github.com/Ch3nYe/JsDeObsBench) (9,000+ obfuscated JavaScript samples across 7 transformations + combinations). Overall score is the mean of syntax validity, execution correctness, Halstead length reduction, and CodeBLEU similarity to the original source.
 
 | Tool | Type | Single | Combination | Combined |
 |---|---|---|---|---|
