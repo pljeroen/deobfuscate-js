@@ -247,4 +247,22 @@ describe("control flow object inlining", () => {
       expect(result).not.toContain("_0x4e08");
     });
   });
+
+  describe("RC3: resilience to stale paths", () => {
+    it("does not crash on Container is falsy errors", () => {
+      // Pattern where multiple call sites of the same property exist in contexts
+      // that may become stale during replacement (e.g., nested in same expression)
+      const result = deobfuscate(`
+        var _0x1234 = {
+          'abc': function(a, b) { return a + b; },
+          'def': "hello"
+        };
+        var x = _0x1234['abc'](_0x1234['abc'](1, 2), 3);
+        console.log(_0x1234['def']);
+      `);
+      // Should not crash, and should inline at least partially
+      expect(result).toContain("hello");
+      expect(result).not.toContain("_0x1234");
+    });
+  });
 });

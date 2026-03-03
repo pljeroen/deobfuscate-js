@@ -143,4 +143,120 @@ describe("anti-debug removal", () => {
       expect(result).toContain("keep");
     });
   });
+
+  describe("RC1: business-logic functions with injected constructor traps", () => {
+    it("preserves Main when constructor traps are in nested function expressions", () => {
+      // C77-0 pattern: debug-protection injects constructor traps inside dead-code branches
+      // of nested function expressions within Main. Main itself has business logic.
+      const result = ad(`
+        function Main(_0x1e2a2c) {
+          const _0x58905c = function () {
+            let _0x1eb39d = true;
+            return function (_0xe64e4a, _0x5c2830) {
+              const _0x1a6e2a = _0x1eb39d ? function () {
+                if (_0x5c2830) {
+                  if ("ZmnoL" !== "jzayM") {
+                    const _0x544a90 = _0x5c2830["apply"](_0xe64e4a, arguments);
+                    _0x5c2830 = null;
+                    return _0x544a90;
+                  } else {
+                    return function (_0x3ec40b) {}["constructor"]("while (true) {}")["apply"]("counter");
+                  }
+                }
+              } : function () {};
+              _0x1eb39d = false;
+              return _0x1a6e2a;
+            };
+          }();
+          console["log"]("APPROVED");
+        }
+        Main("test");
+      `);
+      // Main must survive — it has business logic
+      expect(result).toContain("APPROVED");
+      expect(result).toContain("Main");
+    });
+
+    it("still removes dedicated anti-debug functions with nested FunctionDeclarations", () => {
+      // _0x565abf is purely anti-debug: contains only a helper FunctionDeclaration + try/catch
+      const result = ad(`
+        function _0x565abf(_0x5482fb) {
+          function _0x42a16e(_0xde2075) {
+            if (typeof _0xde2075 === "string") {
+              return function (_0x1c7ac9) {}["constructor"]("while (true) {}")["apply"]("counter");
+            } else {
+              (function () {
+                return true;
+              })["constructor"]("debugger")["call"]('action');
+            }
+            _0x42a16e(++_0xde2075);
+          }
+          try {
+            if (_0x5482fb) {
+              return _0x42a16e;
+            } else {
+              _0x42a16e(0);
+            }
+          } catch (_0x21ec77) {}
+        }
+        _0x565abf("init");
+        console.log("keep");
+      `);
+      expect(result).not.toContain("_0x565abf");
+      expect(result).not.toContain("_0x42a16e");
+      expect(result).toContain("keep");
+    });
+
+    it("handles split 'debu' + 'gger' pattern in dedicated anti-debug functions", () => {
+      const result = ad(`
+        function _0xdebugHelper() {
+          (function(){return true})["constructor"]("debu" + "gger")["call"]("action");
+        }
+        _0xdebugHelper();
+        console.log("keep");
+      `);
+      expect(result).not.toContain("_0xdebugHelper");
+      expect(result).toContain("keep");
+    });
+  });
+
+  describe("RC2: self-defending init/chain/input pattern", () => {
+    it("removes self-defending guard with init/chain/input strings", () => {
+      const result = ad(`
+        var _0x1234 = _0xfactory(this, function() {
+          var _0x5678 = new RegExp("function *\\\\( *\\\\)");
+          var _0xabcd = new RegExp("\\\\+\\\\+ *(?:[a-zA-Z_$][0-9a-zA-Z_$]*)", "i");
+          var _0xresult = _0xcheck("init");
+          if (!_0x5678.test(_0xresult + "chain") || !_0xabcd.test(_0xresult + "input")) {
+            _0xresult("0");
+          } else {
+            _0xcheck();
+          }
+        });
+        _0x1234();
+        console.log("keep");
+      `);
+      expect(result).not.toContain("_0x1234");
+      expect(result).toContain("keep");
+    });
+
+    it("removes init/chain/input guard declared in multi-level factory", () => {
+      // Pattern where init/chain/input is in a nested callback
+      const result = ad(`
+        var _0xguard = someFactory(this, function() {
+          var fn = _0xhelper("init");
+          if (!new RegExp("function *\\\\( *\\\\)").test(fn + "chain") ||
+              !new RegExp("\\\\+\\\\+").test(fn + "input")) {
+            fn("0");
+          } else {
+            _0xhelper();
+          }
+        });
+        _0xguard();
+        console.log("keep");
+      `);
+      expect(result).not.toContain("_0xguard");
+      expect(result).toContain("keep");
+    });
+  });
 });

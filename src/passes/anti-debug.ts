@@ -41,10 +41,11 @@ export const antiDebugPass: ASTPass = {
         if (!t.isIdentifier(path.node.id) || !path.node.init) return;
         if (!t.isCallExpression(path.node.init)) return;
 
-        // Check if any argument function contains the self-defending regex or console override
+        // Check if any argument function contains the self-defending regex, console override,
+        // or the init/chain/input self-defending pattern
         for (const arg of path.node.init.arguments) {
           if (!t.isFunctionExpression(arg) && !t.isArrowFunctionExpression(arg)) continue;
-          if (containsString(arg, "(((.+)+)+)+$") || isConsoleOverride(arg)) {
+          if (containsString(arg, "(((.+)+)+)+$") || isConsoleOverride(arg) || isSelfDefendingInitChainInput(arg)) {
             const name = path.node.id.name;
             removedNames.add(name);
             // Remove the subsequent call: name()
@@ -151,14 +152,39 @@ export const antiDebugPass: ASTPass = {
   },
 };
 
-/** Check if a function body contains .constructor("debugger") or .constructor("while (true) {}") */
+/**
+ * Check if a function body contains .constructor("debugger") or .constructor("while (true) {}")
+ * Only traverses into nested FunctionDeclarations (dedicated anti-debug helpers), NOT into
+ * FunctionExpressions/ArrowFunctionExpressions (which may contain injected dead-code traps
+ * inside business-logic functions like Main).
+ */
 function containsConstructorTrap(path: NodePath<t.FunctionDeclaration>): boolean {
   let found = false;
   path.traverse({
+    // Skip nested function expressions — they may contain dead-code injected traps
+    // that don't make the enclosing function an anti-debug function
+    FunctionExpression(p) { p.skip(); },
+    ArrowFunctionExpression(p) { p.skip(); },
     StringLiteral(innerPath) {
       if (found) return;
       const val = innerPath.node.value;
       if (val !== "debugger" && val !== "while (true) {}") return;
+      const callee = innerPath.parent;
+      if (
+        t.isCallExpression(callee) &&
+        t.isMemberExpression(callee.callee) &&
+        isPropertyNamed(callee.callee, "constructor")
+      ) {
+        found = true;
+      }
+    },
+    // Also detect split "debu" + "gger" pattern: .constructor("debu" + "gger")
+    BinaryExpression(innerPath) {
+      if (found) return;
+      if (innerPath.node.operator !== "+") return;
+      if (!t.isStringLiteral(innerPath.node.left) || !t.isStringLiteral(innerPath.node.right)) return;
+      const combined = innerPath.node.left.value + innerPath.node.right.value;
+      if (combined !== "debugger") return;
       const callee = innerPath.parent;
       if (
         t.isCallExpression(callee) &&
@@ -369,6 +395,42 @@ function nodeReferencesAny(node: t.Node, names: Set<string>): boolean {
 
 function isObfuscatedName(name: string): boolean {
   return /_0x[0-9a-f]+$/i.test(name);
+}
+
+/**
+ * Check if a function body contains the self-defending "init"/"chain"/"input" pattern.
+ * This pattern uses: a call with "init" argument, string concatenation with "chain" and "input",
+ * and RegExp tests with "function *\( *\)" pattern.
+ */
+function isSelfDefendingInitChainInput(fn: t.FunctionExpression | t.ArrowFunctionExpression): boolean {
+  const body = t.isBlockStatement(fn.body) ? fn.body : null;
+  if (!body) return false;
+
+  let hasInit = false;
+  let hasChain = false;
+  let hasInput = false;
+
+  function walk(node: t.Node): void {
+    if (hasInit && hasChain && hasInput) return;
+    if (t.isStringLiteral(node)) {
+      if (node.value === "init") hasInit = true;
+      if (node.value === "chain") hasChain = true;
+      if (node.value === "input") hasInput = true;
+    }
+    for (const key of t.VISITOR_KEYS[node.type] || []) {
+      const child = (node as any)[key];
+      if (Array.isArray(child)) {
+        for (const c of child) {
+          if (t.isNode(c)) walk(c);
+        }
+      } else if (t.isNode(child)) {
+        walk(child);
+      }
+    }
+  }
+
+  walk(body);
+  return hasInit && hasChain && hasInput;
 }
 
 /** Check if a member expression property matches a name (handles both .prop and ["prop"]) */

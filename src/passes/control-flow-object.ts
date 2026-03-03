@@ -102,8 +102,10 @@ function inlineControlFlowObject(path: NodePath<t.VariableDeclaration>): boolean
 
   // Phase 2: Inline function proxy calls (one at a time to avoid stale paths)
   let phase2changed = true;
-  while (phase2changed) {
+  let phase2iters = 0;
+  while (phase2changed && phase2iters < 500) {
     phase2changed = false;
+    phase2iters++;
     path.scope.crawl();
     binding = path.scope.getBinding(objName);
     if (!binding) break;
@@ -128,30 +130,35 @@ function inlineControlFlowObject(path: NodePath<t.VariableDeclaration>): boolean
       const args = rawArgs as t.Expression[];
       let replaced = false;
 
-      if (info.type === "binary") {
-        if (info.leftIdx >= args.length || info.rightIdx >= args.length) continue;
-        callPath.replaceWith(
-          t.binaryExpression(info.operator, t.cloneNode(args[info.leftIdx]), t.cloneNode(args[info.rightIdx]))
-        );
-        replaced = true;
-      } else if (info.type === "logical") {
-        if (info.leftIdx >= args.length || info.rightIdx >= args.length) continue;
-        callPath.replaceWith(
-          t.logicalExpression(info.operator, t.cloneNode(args[info.leftIdx]), t.cloneNode(args[info.rightIdx]))
-        );
-        replaced = true;
-      } else if (info.type === "call") {
-        if (info.calleeIdx >= args.length) continue;
-        const callee = t.cloneNode(args[info.calleeIdx]);
-        let passedArgs: t.Expression[];
-        if (info.hasRest) {
-          passedArgs = args.slice(info.calleeIdx + 1).map(a => t.cloneNode(a));
-        } else {
-          if (info.argIndices.some(i => i >= args.length)) continue;
-          passedArgs = info.argIndices.map(i => t.cloneNode(args[i]));
+      try {
+        if (info.type === "binary") {
+          if (info.leftIdx >= args.length || info.rightIdx >= args.length) continue;
+          callPath.replaceWith(
+            t.binaryExpression(info.operator, t.cloneNode(args[info.leftIdx]), t.cloneNode(args[info.rightIdx]))
+          );
+          replaced = true;
+        } else if (info.type === "logical") {
+          if (info.leftIdx >= args.length || info.rightIdx >= args.length) continue;
+          callPath.replaceWith(
+            t.logicalExpression(info.operator, t.cloneNode(args[info.leftIdx]), t.cloneNode(args[info.rightIdx]))
+          );
+          replaced = true;
+        } else if (info.type === "call") {
+          if (info.calleeIdx >= args.length) continue;
+          const callee = t.cloneNode(args[info.calleeIdx]);
+          let passedArgs: t.Expression[];
+          if (info.hasRest) {
+            passedArgs = args.slice(info.calleeIdx + 1).map(a => t.cloneNode(a));
+          } else {
+            if (info.argIndices.some(i => i >= args.length)) continue;
+            passedArgs = info.argIndices.map(i => t.cloneNode(args[i]));
+          }
+          callPath.replaceWith(t.callExpression(callee, passedArgs));
+          replaced = true;
         }
-        callPath.replaceWith(t.callExpression(callee, passedArgs));
-        replaced = true;
+      } catch {
+        // Stale AST path (e.g., "Container is falsy") — skip this reference
+        continue;
       }
 
       if (replaced) {
