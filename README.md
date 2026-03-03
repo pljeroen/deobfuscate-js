@@ -1,6 +1,6 @@
 # deobfuscate-js
 
-![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-522%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-555%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green) ![JsDeObsBench](https://img.shields.io/badge/JsDeObsBench-%231-orange)
 
 JavaScript de-obfuscation toolkit. Reverses javascript-obfuscator/obfuscator.io transforms (string array encoding, control flow flattening, proxy function objects, anti-debug traps) and handles webpack/browserify bundles. Combines AST-based transforms with token-level formatting to produce readable output from obfuscated or minified JavaScript.
 
@@ -264,6 +264,31 @@ Also provides `parseWithDiagnostics()` returning `{ ast, warnings }` for truncat
 
 ## Results
 
+### JsDeObsBench Benchmark
+
+Evaluated on [JsDeObsBench](https://github.com/nickcyran/JsDeObsBench) (9,000+ obfuscated JavaScript samples across 7 transformations + combinations). Scores are averages of syntax validity, execution correctness, code complexity reduction (Halstead), and CodeBLEU similarity.
+
+| # | Tool | Type | Single | Combination | Combined |
+|---|---|---|---|---|---|
+| **1** | **deobfuscate-js** | Expert | **76.04** | **84.49** | **80.26** |
+| 2 | webcrack | Expert | 73.99 | 85.68 | 79.84 |
+| 3 | deepseek-chat | LLM | 75.17 | — | — |
+| 4 | GPT-4o | LLM | 73.67 | 41.68 | 57.67 |
+
+Per-transformation breakdown (single):
+
+| Transformation | Syntax | Exe | Decomplex | CodeBLEU | Overall |
+|---|---|---|---|---|---|
+| code-compact | 100.0 | 99.9 | 1.0 | 62.4 | 65.8 |
+| control-flow-flattening | 100.0 | 99.5 | 26.7 | 70.4 | 74.1 |
+| deadcode-injection | 100.0 | 99.7 | 46.4 | 68.9 | 78.7 |
+| debug-protection | 100.0 | 99.8 | 65.8 | 70.3 | 84.0 |
+| name-obfuscation | 100.0 | 98.2 | 1.5 | 53.1 | 63.2 |
+| self-defending | 100.0 | 99.8 | 47.4 | 70.4 | 79.4 |
+| string-obfuscation | 100.0 | 98.4 | 72.2 | 76.5 | 86.8 |
+
+100% syntax validity across all transformations. Execution correctness 98-100%.
+
 ### Minified JavaScript
 
 Tested on `lodash.min.js` v4.17.23:
@@ -277,22 +302,10 @@ Tested on `lodash.min.js` v4.17.23:
 
 Output passes `node --check` -- syntactically valid JavaScript.
 
-### Obfuscated JavaScript (vs webcrack)
-
-Tested against [webcrack](https://github.com/j4k0xb/webcrack) on 9 samples with varying javascript-obfuscator settings:
-
-| Result | Count | Notes |
-|---|---|---|
-| Win | 4 | Better readability, more patterns resolved |
-| Tie | 3 | Equivalent output quality |
-| Loss | 2 | Naming length differences only |
-
-Both tools produce syntactically valid output on all samples. Losses are minor (variable name length, not correctness).
-
 ## Testing
 
 ```bash
-npm test           # run all tests (522)
+npm test           # run all tests (555)
 npm run test:watch # watch mode
 ```
 
