@@ -1,9 +1,9 @@
 node_modules/
 dist/
 output/
-.tddv6/
 .claude/
 CLAUDE.md
 SESSION_HANDOFF*.md
 .hypothesis/
 benchmarks/
+.tddv6
