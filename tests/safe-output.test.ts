@@ -37,11 +37,11 @@
  *     -> Result<{ outputId: FileId; doneToStderr: boolean }>
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
 import * as fs from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
+import { TempDirs } from "./temp-dirs.js";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const SAFE_OUTPUT = join(ROOT, "src", "cli", "safe-output.ts");
@@ -53,8 +53,11 @@ async function load(): Promise<any> {
   return await import(/* @vite-ignore */ SAFE_OUTPUT);
 }
 
+const temps = new TempDirs();
+afterAll(() => temps.removeAll());
+
 function tmp(): string {
-  return fs.mkdtempSync(join(tmpdir(), "safeout-"));
+  return temps.make("safeout-");
 }
 
 function sha(path: string): string {
@@ -117,7 +120,7 @@ function opensOf(calls: Call[], path: string): Call[] {
   return calls.filter((c) => c.op === "openSync" && c.args[0] === path);
 }
 
-/** FC-103(e): no open with O_TRUNC or O_RDWR, numeric flags only for write opens, no write to another fd. */
+/** No open carries O_TRUNC or O_RDWR, and every write open passes numeric flags. */
 function assertNoForbiddenOpens(calls: Call[]): void {
   for (const c of calls.filter((x) => x.op === "openSync")) {
     const flags = c.args[1];
@@ -129,10 +132,10 @@ function assertNoForbiddenOpens(calls: Call[]): void {
 }
 
 // ---------------------------------------------------------------------------
-// FC-104 IdentityDecision
+// identity decision
 // ---------------------------------------------------------------------------
 
-describe("IdentityDecision (FC-104, CS-01, CS-05)", () => {
+describe("IdentityDecision", () => {
   const IN = "/clisafe/in.js";
   const OUT = "/clisafe/out.js";
 
@@ -194,7 +197,7 @@ describe("IdentityDecision (FC-104, CS-01, CS-05)", () => {
     expect(unk.decision).toBe("Unknown");
     expect(unk.code).toBe("EACCES");
 
-    // any input-side realpath error fails closed, ENOENT included (AL-9)
+    // any input-side realpath error fails closed, ENOENT included
     for (const code of ["ENOENT", "EACCES"]) {
       r = realpaths({ [IN]: osError(code, "realpath"), [OUT]: "/real/a.js" });
       expect(m.identityDecision(z, t, IN, OUT, { ops: r.ops }).decision).toBe("Unknown");
@@ -203,10 +206,10 @@ describe("IdentityDecision (FC-104, CS-01, CS-05)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// FC-106, FC-107, FC-108 input open and bounded read
+// input open and bounded read
 // ---------------------------------------------------------------------------
 
-describe("single input descriptor and bounded read (FC-106, FC-107, FC-108, CS-01, CS-12)", () => {
+describe("single input descriptor and bounded read", () => {
   it("opens the input once read-only; replacing the input path after the open changes neither the bytes nor the identity", async () => {
     const m = await load();
     const dir = tmp();
@@ -322,7 +325,7 @@ describe("single input descriptor and bounded read (FC-106, FC-107, FC-108, CS-0
 });
 
 // ---------------------------------------------------------------------------
-// FC-109 / FC-103 guarded write
+// guarded write
 // ---------------------------------------------------------------------------
 
 function writeFixture() {
@@ -332,7 +335,7 @@ function writeFixture() {
   return { dir, input, idIn: idOf(input), inSha: sha(input), data: Buffer.from("var output = 42;\nconsole.log(output);\n") };
 }
 
-describe("guarded write protocol (FC-109, FC-103, CS-05)", () => {
+describe("guarded write protocol", () => {
   it("absent output: exclusive create, fstat, ftruncate, full write, close on one descriptor; returns its identity", async () => {
     const m = await load();
     const { dir, input, idIn, data } = writeFixture();
@@ -368,7 +371,7 @@ describe("guarded write protocol (FC-109, FC-103, CS-05)", () => {
     assertNoForbiddenOpens(calls);
   });
 
-  it("existing distinct output: EEXIST leads to one O_WRONLY re-open, identity checked before any truncation, exact content", async () => {
+  it("existing distinct output: EEXIST leads to one write-only re-open that can create but never truncates, identity checked before any truncation, exact content", async () => {
     const m = await load();
     for (const prior of ["x".repeat(500), "y"]) {
       const { dir, input, idIn, inSha, data } = writeFixture();
@@ -381,7 +384,7 @@ describe("guarded write protocol (FC-109, FC-103, CS-05)", () => {
       const opens = opensOf(calls, out);
       expect(opens).toHaveLength(2);
       expect(opens[0].args[1]).toBe(O_WRONLY | O_CREAT | O_EXCL);
-      expect(opens[1].args[1]).toBe(O_WRONLY);
+      expect(opens[1].args[1]).toBe(O_WRONLY | O_CREAT);
       const ops2 = calls.map((c) => c.op);
       expect(ops2.indexOf("fstatSync", calls.indexOf(opens[1]))).toBeLessThan(ops2.indexOf("ftruncateSync"));
       expect(sha(input)).toBe(inSha);
@@ -683,7 +686,7 @@ describe("guarded write protocol (FC-109, FC-103, CS-05)", () => {
     expect(fs.readdirSync(outDir)).toEqual([]);
   });
 
-  it("overwrites an existing write-only (mode 0200) output and refuses a dangling-symlink output leaving the target absent", async () => {
+  it("overwrites an existing write-only (mode 0200) output, and a dangling-symlink output creates its target with the output (the link stays a symlink)", async () => {
     const m = await load();
     const { dir, input, idIn, data } = writeFixture();
     const wo = join(dir, "write-only.js");
@@ -695,22 +698,142 @@ describe("guarded write protocol (FC-109, FC-103, CS-05)", () => {
     expect(fs.readFileSync(wo)).toEqual(data);
 
     const link = join(dir, "dangling.js");
-    const target = join(dir, "target-does-not-exist.js");
+    const target = join(dir, "missing-target.js");
     fs.symlinkSync(target, link);
     const r2 = m.guardedWrite(link, data, idIn, input, { ops: tracedOps({ fstatStdout: unrelatedStdout(dir) }).ops });
-    expect(r2.ok).toBe(false);
-    expect(r2.error.reason).toBe("WRITE");
-    expect(r2.error.stage).toBe("WPRE");
-    expect(r2.error.code).toBe("ENOENT");
-    expect(fs.existsSync(target)).toBe(false);
+    expect(r2.ok).toBe(true);
+    expect(r2.value.doneToStderr).toBe(false);
+    expect(fs.existsSync(target)).toBe(true);
+    expect(fs.readFileSync(target)).toEqual(data);
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(r2.value.outputId).toEqual(idOf(target));
+
+    // the created target gets the same mode as a file made by the exclusive create
+    const fresh = join(dir, "fresh.js");
+    expect(m.guardedWrite(fresh, data, idIn, input, { ops: tracedOps({ fstatStdout: unrelatedStdout(dir) }).ops }).ok).toBe(true);
+    expect(fs.statSync(target).mode & 0o777).toBe(fs.statSync(fresh).mode & 0o777);
+  });
+
+  it("an existing output that the operating system protects from O_CREAT opens is refused at the re-open: WPRE, nothing truncated or written, output and input unchanged", async () => {
+    const m = await load();
+    const { dir, input, idIn, inSha, data } = writeFixture();
+    const out = join(dir, "planted.js");
+    fs.writeFileSync(out, "PLANTED-BYTES");
+    fs.chmodSync(out, 0o666);
+    const before = fs.statSync(out, { bigint: true });
+    // Models Linux fs.protected_regular for another user's file in a shared sticky directory:
+    // an open of the existing file that carries O_CREAT (without O_EXCL) is refused with
+    // EACCES, an open without O_CREAT is not checked, O_CREAT|O_EXCL still fails EEXIST.
+    const { ops, calls } = tracedOps({
+      openSync: (p: string, f: number, mode?: number) => {
+        if (p === out && (f & O_CREAT) !== 0 && (f & O_EXCL) === 0) throw osError("EACCES", "open");
+        return fs.openSync(p, f, mode);
+      },
+      fstatStdout: unrelatedStdout(dir),
+    });
+    const r = m.guardedWrite(out, data, idIn, input, { ops });
+    expect(r.ok, "the re-open of a protected existing output must be refused").toBe(false);
+    expect(r.error.reason).toBe("WRITE");
+    expect(r.error.stage).toBe("WPRE");
+    expect(r.error.path).toBe(out);
+    expect(r.error.op).toBe("open");
+    expect(r.error.code).toBe("EACCES");
+    const opens = opensOf(calls, out);
+    expect(opens).toHaveLength(2);
+    expect(opens[0].args[1]).toBe(O_WRONLY | O_CREAT | O_EXCL);
+    expect(calls.filter((c) => c.op === "ftruncateSync" || c.op === "writeSync")).toHaveLength(0);
+    expect(fs.readFileSync(out, "utf-8")).toBe("PLANTED-BYTES");
+    const after = fs.statSync(out, { bigint: true });
+    expect([after.ino, after.uid, after.mode, after.size]).toEqual([before.ino, before.uid, before.mode, before.size]);
+    expect(sha(input)).toBe(inSha);
+    assertNoForbiddenOpens(calls);
+  });
+
+  it("a dangling-symlink output whose target directory does not exist is refused at the re-open (ENOENT) and creates nothing", async () => {
+    const m = await load();
+    const { dir, input, idIn, inSha, data } = writeFixture();
+    const link = join(dir, "into-missing.js");
+    fs.symlinkSync(join(dir, "no-such-dir", "out.js"), link);
+    const entriesBefore = fs.readdirSync(dir).sort();
+    const { ops, calls } = tracedOps({ fstatStdout: unrelatedStdout(dir) });
+    const r = m.guardedWrite(link, data, idIn, input, { ops });
+    expect(r.ok).toBe(false);
+    expect(r.error.reason).toBe("WRITE");
+    expect(r.error.stage).toBe("WPRE");
+    expect(r.error.path).toBe(link);
+    expect(r.error.op).toBe("open");
+    expect(r.error.code).toBe("ENOENT");
+    expect(fs.existsSync(join(dir, "no-such-dir"))).toBe(false);
+    expect(fs.readdirSync(dir).sort()).toEqual([...entriesBefore, "unrelated-stdout"].sort());
+    expect(calls.filter((c) => c.op === "ftruncateSync" || c.op === "writeSync")).toHaveLength(0);
+    expect(sha(input)).toBe(inSha);
+    assertNoForbiddenOpens(calls);
+  });
+
+  it.skipIf(IS_ROOT)("a dangling-symlink output whose target directory is not writable is refused at the re-open (EACCES) and creates nothing", async () => {
+    const m = await load();
+    const { dir, input, idIn, inSha, data } = writeFixture();
+    const locked = join(dir, "locked");
+    fs.mkdirSync(locked);
+    const link = join(dir, "into-locked.js");
+    fs.symlinkSync(join(locked, "out.js"), link);
+    fs.chmodSync(locked, 0o500);
+    try {
+      const { ops, calls } = tracedOps({ fstatStdout: unrelatedStdout(dir) });
+      const r = m.guardedWrite(link, data, idIn, input, { ops });
+      expect(r.ok).toBe(false);
+      expect(r.error.reason).toBe("WRITE");
+      expect(r.error.stage).toBe("WPRE");
+      expect(r.error.path).toBe(link);
+      expect(r.error.op).toBe("open");
+      expect(r.error.code).toBe("EACCES");
+      expect(fs.readdirSync(locked)).toEqual([]);
+      expect(calls.filter((c) => c.op === "ftruncateSync" || c.op === "writeSync")).toHaveLength(0);
+      expect(sha(input)).toBe(inSha);
+    } finally {
+      fs.chmodSync(locked, 0o700);
+    }
+  });
+
+  it("a refusal after the re-open created a dangling symlink's target leaves that target as an empty file (WPRE, nothing written)", async () => {
+    const m = await load();
+    const { dir, input, idIn, inSha, data } = writeFixture();
+    const link = join(dir, "dangling.js");
+    const target = join(dir, "created-by-reopen.js");
+    fs.symlinkSync(target, link);
+    const st = { fd: -1 };
+    const { ops, calls } = tracedOps({
+      openSync: (p: string, f: number, mode?: number) => {
+        const fd = fs.openSync(p, f, mode);
+        if (p === link) st.fd = fd;
+        return fd;
+      },
+      fstatSync: (fd: number, o?: fs.StatOptions) => {
+        if (fd === st.fd) throw osError("EIO", "fstat");
+        return fs.fstatSync(fd, o as fs.StatOptions & { bigint: true });
+      },
+      fstatStdout: unrelatedStdout(dir),
+    });
+    const r = m.guardedWrite(link, data, idIn, input, { ops });
+    expect(r.ok).toBe(false);
+    expect(r.error.stage).toBe("WPRE");
+    expect(fs.existsSync(target), "the re-open created the link target").toBe(true);
+    expect(r.error.reason).toBe("IDUNK");
+    expect(r.error.op).toBe("fstat");
+    expect(r.error.code).toBe("EIO");
+    expect(fs.statSync(target).size).toBe(0);
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(calls.filter((c) => c.op === "ftruncateSync" || c.op === "writeSync")).toHaveLength(0);
+    expect(sha(input)).toBe(inSha);
+    assertNoForbiddenOpens(calls);
   });
 });
 
 // ---------------------------------------------------------------------------
-// FC-121 Done destination decision (seam half of IT-18)
+// Done destination decision (the process-level cases are in cli-safety.test.ts)
 // ---------------------------------------------------------------------------
 
-describe("Done destination from the fd-1 identity (FC-121, CS-15)", () => {
+describe("Done destination from the fd-1 identity", () => {
   it("reports doneToStderr only when fstat(1) has the identity of the verified output descriptor", async () => {
     const m = await load();
     const cases: Array<[string, (out: string, dir: string) => AnyFn, boolean]> = [
@@ -737,10 +860,10 @@ describe("Done destination from the fd-1 identity (FC-121, CS-15)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// FC-110 / FC-103 static placement checks
+// static placement checks
 // ---------------------------------------------------------------------------
 
-describe("safe-output module placement and mutation surface (FC-110, FC-103)", () => {
+describe("safe-output module placement and mutation surface", () => {
   it("imports only node:fs (and node:path) and contains no rename, unlink, temp-file or path-based write", () => {
     expect(fs.existsSync(SAFE_OUTPUT)).toBe(true);
     const src = fs.readFileSync(SAFE_OUTPUT, "utf-8");

@@ -7,20 +7,23 @@
  * while it runs). The shim records each invocation in a marker file.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
+import { TempDirs } from "./temp-dirs.js";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const WRAPPER = join(ROOT, "scripts", "deobfuscate-js.sh");
 const IS_ROOT = typeof process.getuid === "function" && process.getuid() === 0;
 const TIMEOUT = 90000;
 
+const temps = new TempDirs();
+afterAll(() => temps.removeAll());
+
 function tmp(): string {
-  return fs.mkdtempSync(join(tmpdir(), "wrapsafe-"));
+  return temps.make("wrapsafe-");
 }
 
 function sha(path: string): string {
@@ -55,7 +58,7 @@ function runWrapper(input: string, output: string, pathPrefix?: string) {
   return { status: r.status, stderr: r.stderr ?? "", errorLines: (r.stderr ?? "").split("\n").filter((l) => l.startsWith("ERROR")) };
 }
 
-describe("wrapper alias refusal at start (FC-117 W1, FC-119, CS-09, UX-14)", () => {
+describe("wrapper alias refusal at start", () => {
   it.each([
     ["identical literal path", (_d: string, input: string) => input],
     ["a symlink to the input", (d: string, input: string) => {
@@ -97,7 +100,7 @@ describe("wrapper alias refusal at start (FC-117 W1, FC-119, CS-09, UX-14)", () 
   }, TIMEOUT);
 });
 
-describe("wrapper re-check before the fallback (FC-117 W3, CS-09)", () => {
+describe("wrapper re-check before the fallback", () => {
   it.each([
     ["hard link", "fail-after-hardlink"],
     ["symlink", "fail-after-symlink"],
@@ -128,7 +131,7 @@ describe("wrapper re-check before the fallback (FC-117 W3, CS-09)", () => {
   }, TIMEOUT);
 });
 
-describe("checked fallback redirection (FC-117 W3/W4, FC-119, CS-09, CS-06)", () => {
+describe("checked fallback redirection", () => {
   it.skipIf(IS_ROOT)("exits 1 with an ERROR naming OUTPUT when the empty-output redirection fails", () => {
     const d = tmp();
     const input = join(d, "in.js");
@@ -172,7 +175,7 @@ describe("checked fallback redirection (FC-117 W3/W4, FC-119, CS-09, CS-06)", ()
   }, TIMEOUT);
 });
 
-describe("wrapper text constraints (FC-117 W2, CS-06, OD-CLI-13 (6), STI-02)", () => {
+describe("wrapper text constraints", () => {
   it("keeps the base CLI invocation, the --unsafe and exit 0 substrings, and does no errno classification", () => {
     const text = fs.readFileSync(WRAPPER, "utf-8");
     expect(text).toContain("--unsafe");

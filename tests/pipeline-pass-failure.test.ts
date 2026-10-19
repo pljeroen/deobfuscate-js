@@ -53,10 +53,10 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// FC-111 / FC-115 structured parse outcome
+// structured parse outcome
 // ---------------------------------------------------------------------------
 
-describe("structured parse outcome (FC-111, FC-115, CS-02)", () => {
+describe("structured parse outcome", () => {
   it("reports completeness, mode, recoveredErrors and truncatedAtLine for real inputs, base fields unchanged", () => {
     const clean: Any = parseWithDiagnostics("var a = 1;");
     expect(clean.warnings).toEqual([]);
@@ -137,10 +137,10 @@ describe("structured parse outcome (FC-111, FC-115, CS-02)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// FC-111 / FC-112 pipeline result fields
+// pipeline result fields
 // ---------------------------------------------------------------------------
 
-describe("pipeline result carries the initial parse outcome and statement counts (FC-111, FC-112, CS-02, CS-03)", () => {
+describe("pipeline result carries the initial parse outcome and statement counts", () => {
   it("exposes initialParse, inputStatementCount and finalStatementCount (directives counted)", () => {
     const two: Any = runPipelineWithReport("var a = 1;\nvar b = 2;\n", [], [formatPass]);
     expect(two.initialParse.completeness).toBe("whole");
@@ -176,10 +176,10 @@ describe("pipeline result carries the initial parse outcome and statement counts
 });
 
 // ---------------------------------------------------------------------------
-// FC-113 transactional pass skip
+// transactional pass skip
 // ---------------------------------------------------------------------------
 
-describe("transactional skip of a throwing pass (FC-113, CS-04)", () => {
+describe("transactional skip of a throwing pass", () => {
   const COMMENTED = "// lead\nvar a = 1; // trail\n/* mid */\nfunction f() { return 1 + 2; }\n";
 
   it("an AST pass that mutates (comments included) and then throws leaves no trace: output equals the run without it", () => {
@@ -297,7 +297,7 @@ describe("transactional skip of a throwing pass (FC-113, CS-04)", () => {
   });
 });
 
-describe("rollback leaves no trace of re-execution (FC-113, CS-04, OD-CLI-18)", () => {
+describe("rollback leaves no trace of re-execution", () => {
   it("a clean run executes each pass once per iteration; two failing passes are each skipped once per invocation, no duplicate entries", () => {
     const src = "var a = 1 + 2;\nconsole.log(a);\n";
     const runs: Record<string, number> = {};
@@ -331,10 +331,10 @@ describe("rollback leaves no trace of re-execution (FC-113, CS-04, OD-CLI-18)", 
 });
 
 // ---------------------------------------------------------------------------
-// FC-114 inter-iteration re-parse discard
+// inter-iteration re-parse discard
 // ---------------------------------------------------------------------------
 
-describe("inter-iteration re-parse discard (FC-114, CS-11)", () => {
+describe("inter-iteration re-parse discard", () => {
   const SRC = "var a = 1;\nconsole.log(a);\n";
 
   function garbler(kind: "truncation" | "recovery" | "empty", atInvocation = 1): ASTPass {
@@ -386,7 +386,7 @@ describe("inter-iteration re-parse discard (FC-114, CS-11)", () => {
     expect(r.warnings.filter((w: string) => DISCARD.test(w) && /truncat/i.test(w))).toHaveLength(1);
   });
 
-  // THAW-1 (OD-CLI-7-ERRATA): degradation is judged relative to the INITIAL parse
+  // degradation is judged relative to the initial parse of the input
   const RECOVERED_INPUT = "foo(1 + 2);\nvar await = 1;\n";
 
   it("an input whose initial parse already has a recovered error is still transformed (no discard without degradation)", () => {
@@ -406,7 +406,7 @@ describe("inter-iteration re-parse discard (FC-114, CS-11)", () => {
     expect(r.warnings.filter((w: string) => DISCARD.test(w) && /recover/i.test(w))).toHaveLength(1);
   });
 
-  // THAW-2 (F-A10-01): the iteration-end generate, right before the re-parse, throws
+  // the iteration-end generate, right before the re-parse, throws
   it("a throwing iteration-end generate is a degraded re-parse: discarded, pre-iteration state kept, one warning, token passes run", async () => {
     const src = "var a = 1;\nconsole.log(a);\n";
     const expected = runPipelineWithReport(src, [], [formatPass]).code;
@@ -455,7 +455,7 @@ describe("inter-iteration re-parse discard (FC-114, CS-11)", () => {
     expect(seen).toHaveLength(1);
   });
 
-  // THAW-3 (F-A10-R1-01): on the FINAL iteration no re-parse follows, so a throwing
+  // on the final iteration no re-parse follows, so a throwing
   // iteration-end generate is an internal error, not a discard
   it("a throwing iteration-end generate on the final iteration (no re-parse follows) propagates with the collected warnings", async () => {
     const src = "var a = 1;\nconsole.log(a);\n";
@@ -554,10 +554,10 @@ describe("inter-iteration re-parse discard (FC-114, CS-11)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// FC-120(a) / FC-115 runner catch and unchanged surfaces
+// runner catch and unchanged surfaces
 // ---------------------------------------------------------------------------
 
-describe("unexpected-error catch in runPipelineWithReport (FC-120, FC-115, CS-13)", () => {
+describe("unexpected-error catch in runPipelineWithReport", () => {
   const skipper = pass("skipper", () => {
     throw new Error("skip me");
   });
@@ -605,7 +605,7 @@ describe("unexpected-error catch in runPipelineWithReport (FC-120, FC-115, CS-13
   it("leaves the success-path result identical to base and runPipeline / runASTPipeline still propagate a throwing pass", () => {
     const src = "var a = 1 + 2;\nif (false) { dead(); }\nconsole.log(a);\n";
     const r: Any = runPipelineWithReport(src, [constantFoldPass, deadCodeEliminatePass], [formatPass]);
-    // values recorded from base 0a45ecc for this input and these passes
+    // values produced by commit 2543118, before the CLI safety changes, for this input and these passes
     expect({
       code: r.code,
       warnings: r.warnings,

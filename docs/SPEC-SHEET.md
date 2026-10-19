@@ -1,6 +1,6 @@
 # deobfuscate-js Specification Sheet
 
-This sheet describes the observable behaviour of the `deobfuscate-js` command line tool, its benchmark wrapper script, and the library API of the safe file access module and the pipeline/parser result types.
+This sheet describes the observable behaviour of the `deobfuscate-js` command line tool and its benchmark wrapper script, which are the product. Section 9 is a reference to the internal modules behind the command line tool (the safe file access module and the pipeline/parser result types).
 
 ## 1. Command line
 
@@ -21,7 +21,7 @@ Any other argument that starts with `--` is ignored, as are positional arguments
 
 Accepted inputs: regular files, FIFOs and character devices such as `/dev/null`. An input without statements is not refused: an empty or whitespace-only input produces an empty output, and a comments-only input is written with its comments, which may be kept.
 
-Accepted outputs: a new or existing regular file, and devices or pipes such as `/dev/null` and `/dev/stdout` (the latter when stdout is a file, pipe or terminal; a socket cannot be opened by path). A directory output is refused.
+Accepted outputs: a new or existing regular file, and devices or pipes such as `/dev/null` and `/dev/stdout` (the latter when stdout is a file, pipe or terminal; a socket cannot be opened by path). A directory output is refused. An output path that is a symlink is followed, and if its target does not exist the target is created (when the target's directory does not exist or cannot be written, the open is refused as described in section 4). On Linux, when the kernel setting `fs.protected_regular` is enabled, the operating system refuses to open an existing output file in a shared world-writable directory with the sticky bit, such as `/tmp`, when that file is owned neither by the user running the tool nor by the directory's owner, even when its permissions allow writing (with the setting `2` also in group-writable sticky directories; `fs.protected_fifos` does the same for a FIFO). The run then ends with `ERROR: Writing output failed: <out> (open: EACCES); nothing was written to the output` and the file is left unchanged. Likewise on Linux with `fs.protected_symlinks` enabled, a symlink in such a directory that is owned neither by that user nor by the directory's owner is not followed, and the run ends with the same `EACCES` line.
 
 ## 2. Exit status
 
@@ -121,7 +121,9 @@ scripts/deobfuscate-js.sh INPUT OUTPUT
 
 The wrapper compares file identity only, with the limits of section 7. A hard link to an input whose directory cannot be searched is not recognized, because the identity of such an input cannot be read.
 
-## 9. Library API
+## 9. Internal modules
+
+The modules in this section are internal to the command line tool and are documented for contributors. They are not a supported interface and may change without notice.
 
 ### `src/cli/safe-output.ts`
 
@@ -135,7 +137,7 @@ Operating-system errors (errors carrying an error code) are returned as values, 
 | `closeInput(handle, { ops? })` | Closes the input descriptor and returns nothing. A close error carrying an error code is deliberately ignored: the descriptor is read-only, so no data can be lost. |
 | `statTarget(path, { ops? })` | Stats a path, following symlinks: `{ ok: true, dev, ino }` or `{ ok: false, code }`. |
 | `identityDecision(idIn, target, inputPath, outputPath, { ops? })` | Returns `{ decision, code?, side? }` with `decision` one of `"Same"`, `"Distinct"`, `"Absent"` (the target does not exist) or `"Unknown"` (any other stat error, or a real-path error in the inode-0 case). `dev` and `ino` are compared as exact `bigint` values; real paths are compared only when either inode is 0. |
-| `guardedWrite(outputPath, data, idIn, inputPath, { ops?, hooks?: { beforeOutputOpen? } })` | Writes `data` through one checked descriptor: exclusive create, or (if the path exists) one write-only open without truncation; stat of the open file; identity check against `idIn`; truncation only for a regular file; writes until every byte is written; close. Returns `WriteSuccess { outputId, doneToStderr }`, where `doneToStderr` is true when file descriptor 1 has the identity of the output. Failures carry reason `WRITE`, `SAME` or `IDUNK` and stage `WPRE` (no data written yet) or `WPOST` (after the first truncation or write). |
+| `guardedWrite(outputPath, data, idIn, inputPath, { ops?, hooks?: { beforeOutputOpen? } })` | Writes `data` through one checked descriptor: exclusive create, or (if the path exists) one write-only re-open without truncation, which creates the file when the path is a symlink to a missing file (or the path was removed after the exclusive create failed); stat of the open file; identity check against `idIn`; truncation only for a regular file; writes until every byte is written; close. Returns `WriteSuccess { outputId, doneToStderr }`, where `doneToStderr` is true when file descriptor 1 has the identity of the output. Failures carry reason `WRITE`, `SAME` or `IDUNK` and stage `WPRE` (no data written yet) or `WPOST` (after the first truncation or write). |
 
 `SafeFailure` fields: `reason` (`INPUT`, `SAME`, `IDUNK`, `SIZE`, `WRITE`), `stage` (`PRE`, `WPRE`, `WPOST`), `path` (as given), and when applicable `code`, `op` (the failing operation), `detail` (for example `zero progress`) and `side` (`input` or `output`).
 

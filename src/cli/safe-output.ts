@@ -276,24 +276,35 @@ function writeFailure<T>(stage: FailureStage, path: string, op: string, code?: s
   return failure({ reason: "WRITE", stage, path, op, ...(code === undefined ? {} : { code }), ...(detail === undefined ? {} : { detail }) });
 }
 
-/** Exclusive create; on EEXIST exactly one write-only re-open, which never truncates. */
+/**
+ * Exclusive create; on EEXIST exactly one write-only re-open with O_CREAT,
+ * which never truncates. O_CREAT leaves an existing file's content as it is;
+ * it makes the operating system apply its sticky-directory protections (Linux
+ * fs.protected_regular, fs.protected_fifos) to an existing file another user
+ * owns, and it creates the file (mode 0o666 before the umask, as the exclusive
+ * create does) when the path is a symlink to a missing file or was removed
+ * after the exclusive create failed.
+ */
 function openOutput(ops: FsOps, outputPath: string): Result<number> {
   const created = attempt(() => ops.openSync(outputPath, O_WRONLY | O_CREAT | O_EXCL, 0o666));
   if (created.ok) return success(created.value);
   if (created.code !== "EEXIST") return writeFailure("WPRE", outputPath, "open", created.code);
-  const existing = attempt(() => ops.openSync(outputPath, O_WRONLY));
+  const existing = attempt(() => ops.openSync(outputPath, O_WRONLY | O_CREAT, 0o666));
   if (!existing.ok) return writeFailure("WPRE", outputPath, "open", existing.code);
   return success(existing.value);
 }
 
 /**
  * Write `data` to the output through one verified descriptor:
- * open (exclusive create, else write-only re-open), fstat, identity check
- * against the input, ftruncate only for a regular file, write until every byte
- * is written (a zero-byte write is a failure), close.
+ * open (exclusive create, else one write-only re-open that can create the file
+ * but never truncates it), fstat, identity check against the input, ftruncate
+ * only for a regular file, write until every byte is written (a zero-byte
+ * write is a failure), close.
  * Failures before the first successful ftruncate or write are stage WPRE and
- * leave the output as it was (or as an empty entry from the exclusive create);
- * later failures are WPOST, after which the output may be empty or partial.
+ * leave the output as it was, except for an empty file created by the
+ * exclusive create or by the re-open (the target of a symlink to a missing
+ * file, or a path removed between the two opens); later failures are WPOST,
+ * after which the output may be empty or partial.
  */
 export function guardedWrite(
   outputPath: string,

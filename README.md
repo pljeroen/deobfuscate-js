@@ -1,6 +1,6 @@
 # deobfuscate-js
 
-![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-698%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-699%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
 
 JavaScript de-obfuscation toolkit. Reverses javascript-obfuscator/obfuscator.io transforms (string array encoding, control flow flattening, proxy function objects, anti-debug traps) and handles webpack/browserify bundles. Combines AST-based transforms with token-level formatting to produce readable output from obfuscated or minified JavaScript.
 
@@ -36,26 +36,26 @@ An unexpected internal error is reported as one `ERROR: internal error: ...` lin
 
 On success the `Done: ...` status line goes to stdout. When the output is the process stdout itself (for example `/dev/stdout`, or stdout redirected to the output file), the `Done:` line goes to stderr instead, so it does not end up in the output.
 
-**Writing the output.** The output is opened without truncating it, and its identity is compared with the input again before anything is written; only then is a regular file truncated and written (devices such as `/dev/null` and pipes are written without truncation). A failure at that point (the output turned out to be the input, it is a directory, its directory does not exist, it cannot be opened) exits with status 1 with the output not modified, except that an empty output file may be left behind if it did not exist before. If an I/O error occurs after the output was truncated or writing started (for example disk full), the CLI exits with status 1 but the output file may be empty or partial. The input file is not modified in either case (within the limits of the same-file check below).
+**Writing the output.** The output is opened without truncating it, and its identity is compared with the input again before anything is written; only then is a regular file truncated and written (devices such as `/dev/null` and pipes are written without truncation). A failure at that point (the output turned out to be the input, it is a directory, its directory does not exist, it cannot be opened) exits with status 1 with the output not modified, except that an empty output file may be left behind if it did not exist before. If an I/O error occurs after the output was truncated or writing started (for example disk full), the CLI exits with status 1 but the output file may be empty or partial. The input file is not modified in either case (within the limits of the same-file check below). On Linux, when the kernel setting `fs.protected_regular` is enabled, the operating system refuses to open an existing output file that another user owns in a shared directory with the sticky bit, such as `/tmp`, even when its permissions allow writing; the run then ends with `ERROR: Writing output failed: <out> (open: EACCES); nothing was written to the output` and the file is left unchanged. An output path that is a symlink is followed, and if its target does not exist the target is created.
 
 **Limits of the same-file check.** The CLI compares file identity (device and inode numbers) before the pipeline runs and again when it opens the output. This relies on a filesystem with stable device/inode identity (local POSIX filesystems, NTFS). It does not cover files changed concurrently by another process while a run is in progress, and a hard link to the input may go unnoticed on filesystems that synthesize inode numbers (some FUSE or network filesystems).
 
 **Benchmark wrapper.** `scripts/deobfuscate-js.sh` exits with status 1 without running the CLI when its input and output are the same file, and checks again before writing its fallback output. The wrapper compares file identity only (the shell `-ef` test, no path comparison), so the limits above apply, and a hard link to an input whose directory cannot be searched is not recognized. For distinct paths it behaves as before: when the CLI fails it writes an empty output file and exits 0; if that empty file cannot be created it exits with status 1.
 
-The full behaviour, including every `ERROR:` line and the library API, is specified in [docs/SPEC-SHEET.md](docs/SPEC-SHEET.md).
+The full behaviour, including every `ERROR:` line, is specified in [docs/SPEC-SHEET.md](docs/SPEC-SHEET.md).
 
 ## Architecture
 
 Two-phase pipeline: AST transforms followed by token-level formatting.
 
-- **AST phase**: Parse once with `@babel/parser`, apply N transform passes via `@babel/traverse`, generate once with `@babel/generator`. Supports iterative convergence -- the full pass sequence repeats up to 3 times until the output stabilizes.
+- **AST phase**: Parse with `@babel/parser`, apply the transform passes via `@babel/traverse`, and generate code with `@babel/generator`. The full pass sequence repeats up to 3 times until the output stabilizes; between iterations the generated code is parsed again.
 - **Token phase**: Tokenize the generated output, re-emit with proper indentation and whitespace.
 
 All passes implement the `ASTPass` or `TokenPass` interface (defined in `src/types.ts`). The pipeline runner is in `src/pipeline.ts`. Each pass can declare a `safety` level (`"safe"` or `"unsafe"`); `filterSafePasses()` strips unsafe passes by default.
 
 ## Pipeline
 
-The 15 AST passes and 1 token pass run in the order below. Some passes appear twice in the pipeline (constant propagation and dead code elimination run both before and after the obfuscator-specific passes to clean up their output). The pipeline uses fingerprint-guided pass selection to skip obfuscator-specific passes when no obfuscation patterns are detected.
+The 17 AST pass steps and 1 token pass run in the order below. Some passes run more than once: constant folding and constant propagation run twice and dead code elimination three times, before and after the obfuscator-specific passes, to clean up their output. The pipeline uses fingerprint-guided pass selection to skip obfuscator-specific passes when no obfuscation patterns are detected.
 
 | # | Pass | File | Description |
 |---|---|---|---|
@@ -65,15 +65,17 @@ The 15 AST passes and 1 token pass run in the order below. Some passes appear tw
 | 4 | Dead Code Eliminate | `dead-code-eliminate.ts` | Remove `if(false)` blocks, unreachable statements, unused variables/functions |
 | 5 | Hex/Unicode Decode | `hex-decode.ts` | Decode `\xHH`, `\uHHHH`, `\u{HHHH}` escapes and hex numeric literals |
 | 6 | String Array (Static) | `string-array-static.ts` | Resolve unencoded/base64 string arrays via static analysis (safe) |
-| 7 | String Array | `string-array.ts` | Resolve string array obfuscation via V8 isolate sandbox execution (unsafe) |
+| 7 | String Array | `string-array.ts` | Resolve string array obfuscation via V8 isolate sandbox execution (unsafe; runs only with `--unsafe`) |
 | 8 | Control Flow Object | `control-flow-object.ts` | Inline control flow storage objects (proxy functions, string literals) |
 | 9 | Control Flow Unflatten | `control-flow-unflatten.ts` | Reconstruct linear flow from dispatch patterns (pipe-delimited + arithmetic) |
-| 10 | Anti-Debug | `anti-debug.ts` | Remove `.constructor("debugger")` traps, console overrides, self-defending guards |
-| 11 | Constant Propagate | `constant-propagate.ts` | Second pass -- clean up constants exposed by passes 7-10 |
-| 12 | Dead Code Eliminate | `dead-code-eliminate.ts` | Second pass -- remove dead code exposed by passes 7-11 |
-| 13 | AST Simplify | `ast-simplify.ts` | Split comma expressions into separate statements, computed to dot access |
-| 14 | Semantic Rename | `semantic-rename.ts` | Rename `_0x`-prefixed variables by usage context (loop counters, arrays, JSON, regex, events) |
-| 15 | Scope-Aware Rename | `ast-rename.ts` | Rename remaining single/two-letter minified names via Babel scope analysis |
+| 10 | Constant Fold | `constant-fold.ts` | Second run -- fold expressions exposed by passes 6-9 |
+| 11 | Dead Code Eliminate | `dead-code-eliminate.ts` | Second run -- remove dead code exposed by passes 6-10 |
+| 12 | Anti-Debug | `anti-debug.ts` | Remove `.constructor("debugger")` traps, console overrides, self-defending guards |
+| 13 | Constant Propagate | `constant-propagate.ts` | Second run -- inline constants exposed by passes 6-12 |
+| 14 | Dead Code Eliminate | `dead-code-eliminate.ts` | Third run -- remove dead code exposed by passes 12-13 |
+| 15 | AST Simplify | `ast-simplify.ts` | Split comma expressions into separate statements, computed to dot access |
+| 16 | Semantic Rename | `semantic-rename.ts` | Rename `_0x`-prefixed variables by usage context (loop counters, arrays, JSON, regex, events) |
+| 17 | Scope-Aware Rename | `ast-rename.ts` | Rename remaining single/two-letter minified names via Babel scope analysis |
 | T1 | Format | `format.ts` | Token-level pretty-print with 2-space indentation and proper whitespace |
 
 All pass source files are in `src/passes/`.
@@ -330,7 +332,7 @@ Output passes `node --check` -- syntactically valid JavaScript.
 ## Testing
 
 ```bash
-npm test           # run all tests (698)
+npm test           # run all tests (699)
 npm run test:watch # watch mode
 ```
 

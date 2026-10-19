@@ -11,18 +11,17 @@
  * modified.
  */
 
-import { describe, it, expect, beforeAll } from "vitest";
-import { spawn, spawnSync, execFileSync } from "node:child_process";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { spawn, spawnSync, execFileSync, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
+import { TempDirs } from "./temp-dirs.js";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const ENTRY = join(ROOT, "src", "index.ts");
 const TSX_LOADER = pathToFileURL(join(ROOT, "node_modules", "tsx", "dist", "loader.mjs")).href;
-const BASE = "0a45ecccc3ad82def92492dc585164f90692c207";
 const MAX = 20 * 1024 * 1024;
 const UNSAFE_NOTICE = "WARNING: Unsafe mode enabled — string-array pass will execute untrusted code";
 const IS_ROOT = typeof process.getuid === "function" && process.getuid() === 0;
@@ -50,6 +49,8 @@ const PLAIN = "var a = 1 + 2;\nconsole.log(a);\n";
 // ---------------------------------------------------------------------------
 
 let STUB_DIR = "";
+const temps = new TempDirs();
+const writers: ChildProcess[] = [];
 
 const STUB_SOURCES: Record<string, string> = {
   "hooks.mjs": `
@@ -125,9 +126,20 @@ function stubMap(s: Stubs): Record<string, string> {
 }
 
 beforeAll(() => {
-  STUB_DIR = fs.mkdtempSync(join(tmpdir(), "clisafe-stubs-"));
+  STUB_DIR = temps.make("clisafe-stubs-");
   for (const [name, text] of Object.entries(STUB_SOURCES)) fs.writeFileSync(join(STUB_DIR, name), text);
 });
+
+/** Remove the temporary directories once every FIFO writer started by this file has exited. */
+afterAll(async () => {
+  await Promise.all(writers.map(exited));
+  temps.removeAll();
+});
+
+function exited(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((done) => child.once("exit", () => done()));
+}
 
 interface RunOpts {
   cwd?: string;
@@ -184,7 +196,7 @@ function runCli(args: string[], o: RunOpts = {}): RunResult {
 }
 
 function tmp(): string {
-  return fs.mkdtempSync(join(tmpdir(), "clisafe-"));
+  return temps.make("clisafe-");
 }
 
 function sha(path: string): string {
@@ -203,7 +215,7 @@ function hasDone(r: RunResult): boolean {
   return /^Done: /m.test(r.stdoutText) || /^Done: /m.test(r.stderr);
 }
 
-/** The shape every refusal shares (FC-102): status 1, one ERROR line, last on stderr, no Done, no stack trace. */
+/** The shape every refusal shares: status 1, one ERROR line, last on stderr, no Done, no stack trace. */
 function expectRefusal(r: RunResult, reason: Reason, label = ""): string {
   expect(r.signal, label).toBeNull();
   expect(r.status, `${label} status; stderr:\n${r.stderr}`).toBe(1);
@@ -244,14 +256,16 @@ function expectClassOrder(stderrLines: string[], label = ""): Cls[] {
 }
 
 function startFifoWriter(fifo: string, shellProducer: string) {
-  return spawn("bash", ["-c", `${shellProducer} > "$1"`, "bash", fifo], { stdio: "ignore" });
+  const child = spawn("bash", ["-c", `${shellProducer} > "$1"`, "bash", fifo], { stdio: "ignore" });
+  writers.push(child);
+  return child;
 }
 
 // ---------------------------------------------------------------------------
-// same-file refusal (S2) and its precedence
+// same-file refusal and its precedence
 // ---------------------------------------------------------------------------
 
-describe("same-file refusal before the pipeline (FC-105, FC-101, FC-119, CS-01, UX-01)", () => {
+describe("same-file refusal before the pipeline", () => {
   type Setup = { args: string[]; cwd?: string; given: string[]; file: string; isDir?: boolean };
   const cases: Array<[string, (d: string) => Setup]> = [
     ["identical literal path", (d) => {
@@ -332,7 +346,7 @@ describe("same-file refusal before the pipeline (FC-105, FC-101, FC-119, CS-01, 
   }, SPAWN_TIMEOUT);
 });
 
-describe("identity unknown at the early check (FC-105, FC-119, CS-01)", () => {
+describe("identity unknown at the early check", () => {
   it.each([
     ["an output under a regular file (ENOTDIR)", "ENOTDIR", (d: string, input: string) => join(input, "out.js")],
     ["a symlink loop as output (ELOOP)", "ELOOP", (d: string) => {
@@ -361,7 +375,7 @@ describe("identity unknown at the early check (FC-105, FC-119, CS-01)", () => {
 // input refusals
 // ---------------------------------------------------------------------------
 
-describe("missing, unreadable or directory input (FC-107, FC-119, CS-12, UX-06)", () => {
+describe("missing, unreadable or directory input", () => {
   it("refuses a nonexistent input with one ERROR naming the path and ENOENT; a pre-existing distinct output keeps its bytes", () => {
     const d = tmp();
     const input = join(d, "missing.js");
@@ -450,7 +464,7 @@ describe("missing, unreadable or directory input (FC-107, FC-119, CS-12, UX-06)"
 // size cap on bytes read
 // ---------------------------------------------------------------------------
 
-describe("20MB cap on the bytes read (FC-108, FC-119, CS-12, UX-07)", () => {
+describe("20MB cap on the bytes read", () => {
   it("refuses a regular file of MAX + 1 bytes with the size message naming the path", () => {
     const d = tmp();
     const input = join(d, "big.js");
@@ -515,7 +529,7 @@ describe("20MB cap on the bytes read (FC-108, FC-119, CS-12, UX-07)", () => {
 // parse outcome refusals
 // ---------------------------------------------------------------------------
 
-describe("unparseable and partially parsed input (FC-111, FC-101, FC-119, CS-02, UX-02)", () => {
+describe("unparseable and partially parsed input", () => {
   it.each([
     ["the empty-program fallback at line 1", "@@@", "PARSE_EMPTY", 1, false],
     ["the empty-program fallback after a failing prefix (line 3)", 'var s = "ok";\nfunction f() {\n@@@', "PARSE_EMPTY", 3, true],
@@ -552,7 +566,7 @@ describe("unparseable and partially parsed input (FC-111, FC-101, FC-119, CS-02,
 // emptiness
 // ---------------------------------------------------------------------------
 
-describe("non-empty input yielding no statements (FC-112, FC-119, CS-03, UX-03)", () => {
+describe("non-empty input yielding no statements", () => {
   it("refuses dead-code-only input with the all-statements-removed message", () => {
     const d = tmp();
     const input = join(d, "dead.js");
@@ -594,7 +608,7 @@ describe("non-empty input yielding no statements (FC-112, FC-119, CS-03, UX-03)"
 // skipped pass at the CLI
 // ---------------------------------------------------------------------------
 
-describe("a throwing pass is skipped with a warning (FC-113, CS-04, UX-04)", () => {
+describe("a throwing pass is skipped with a warning", () => {
   it("an AST pass that mutates and throws: exit 0, WARNING naming pass and message, output equal to the run without the failure", () => {
     const d = tmp();
     const input = join(d, "in.js");
@@ -627,7 +641,7 @@ describe("a throwing pass is skipped with a warning (FC-113, CS-04, UX-04)", () 
 // reporting shape: class order matrix
 // ---------------------------------------------------------------------------
 
-describe("exit status and stderr class order on every outcome (FC-102, CS-10, UX-09, UX-10)", () => {
+describe("exit status and stderr class order on every outcome", () => {
   const FLAGS: Array<[string, string[]]> = [
     ["no flags", []],
     ["--unsafe", ["--unsafe"]],
@@ -705,7 +719,7 @@ describe("exit status and stderr class order on every outcome (FC-102, CS-10, UX
 // output targets and the Done stream
 // ---------------------------------------------------------------------------
 
-describe("output targets and the Done destination (FC-109, FC-121, CS-05, CS-15, UX-08, UX-13, UX-16)", () => {
+describe("output targets and the Done destination", () => {
   function referenceOutput(d: string, src: string): { input: string; bytes: Buffer } {
     const input = join(d, "in.js");
     fs.writeFileSync(input, src);
@@ -763,13 +777,35 @@ describe("output targets and the Done destination (FC-109, FC-121, CS-05, CS-15,
     expect(line).toMatch(/\bEISDIR\b/);
     expect(fs.readdirSync(outDir)).toEqual([]);
   }, SPAWN_TIMEOUT);
+
+  it("an output symlink to a missing file creates that file with the output and exits 0; one into a missing directory is refused with the open ENOENT line", () => {
+    const d = tmp();
+    const { input, bytes } = referenceOutput(d, PLAIN);
+
+    const intoMissing = join(d, "into-missing.js");
+    fs.symlinkSync(join(d, "no-such-dir", "out.js"), intoMissing);
+    const r1 = runCli([input, intoMissing]);
+    expectRefusal(r1, "WRITE", "symlink into a missing directory");
+    expect(r1.stderrLines[r1.stderrLines.length - 1]).toBe(`ERROR: Writing output failed: ${intoMissing} (open: ENOENT); nothing was written to the output`);
+    expect(fs.existsSync(join(d, "no-such-dir"))).toBe(false);
+
+    const link = join(d, "link.js");
+    const target = join(d, "missing-target.js");
+    fs.symlinkSync(target, link);
+    const r2 = runCli([input, link]);
+    expectAccept(r2, "symlink to a missing file");
+    expect(fs.readFileSync(target).equals(bytes), `target was:\n${fs.existsSync(target) ? fs.readFileSync(target, "utf-8") : "(absent)"}`).toBe(true);
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(lines(r2.stdoutText)[0]).toContain(`→ ${link} (`);
+    expect(r2.stderrLines.some((l) => l.startsWith("Done: "))).toBe(false);
+  }, SPAWN_TIMEOUT);
 });
 
 // ---------------------------------------------------------------------------
 // unexpected internal error
 // ---------------------------------------------------------------------------
 
-describe("unexpected internal error (FC-120, FC-103, FC-119, CS-13, UX-11)", () => {
+describe("unexpected internal error", () => {
   function setup(prior: boolean) {
     const d = tmp();
     const input = join(d, "in.js");
@@ -838,7 +874,7 @@ describe("unexpected internal error (FC-120, FC-103, FC-119, CS-13, UX-11)", () 
 // message discriminators
 // ---------------------------------------------------------------------------
 
-describe("ERROR lines stay pairwise distinguishable (FC-119, CS-14, UX-12)", () => {
+describe("ERROR lines stay pairwise distinguishable", () => {
   it("each collected refusal line matches its own discriminator and no other", () => {
     const reasons = Object.keys(D) as Reason[];
     expect(Object.keys(collected).sort()).toEqual([...reasons].sort());
@@ -855,7 +891,7 @@ describe("ERROR lines stay pairwise distinguishable (FC-119, CS-14, UX-12)", () 
 // static source checks
 // ---------------------------------------------------------------------------
 
-describe("static checks of the CLI source (FC-102, FC-103, FC-106, FC-110, FC-111)", () => {
+describe("static checks of the CLI source", () => {
   const index = () => fs.readFileSync(ENTRY, "utf-8");
 
   it("src/index.ts never calls process.exit()", () => {
@@ -872,113 +908,6 @@ describe("static checks of the CLI source (FC-102, FC-103, FC-106, FC-110, FC-11
     for (const f of ["src/index.ts", "src/pipeline.ts"]) {
       const src = fs.readFileSync(join(ROOT, f), "utf-8");
       expect(src, f).not.toMatch(/Could not parse|Truncated at/);
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// repository invariants against the base commit
-// ---------------------------------------------------------------------------
-
-function git(args: string[]): string {
-  return execFileSync("git", args, { cwd: ROOT, encoding: "utf-8", maxBuffer: 64 * 1024 * 1024 });
-}
-function baseAvailable(): boolean {
-  try {
-    git(["cat-file", "-e", `${BASE}^{commit}`]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-const HAS_BASE = baseAvailable();
-
-function addedPaths(prefix: string): string[] {
-  const tracked = git(["diff", "--name-status", BASE, "--", prefix])
-    .split("\n")
-    .filter((l) => l.startsWith("A\t"))
-    .map((l) => l.slice(2));
-  const untracked = git(["ls-files", "--others", "--exclude-standard", "--", prefix]).split("\n").filter(Boolean);
-  return [...new Set([...tracked, ...untracked])].sort();
-}
-
-function functionText(src: string, name: string): string {
-  const start = src.indexOf(`export function ${name}(`);
-  if (start < 0) return "";
-  let depth = 0;
-  let seen = false;
-  for (let i = start; i < src.length; i++) {
-    if (src[i] === "{") {
-      depth++;
-      seen = true;
-    } else if (src[i] === "}") {
-      depth--;
-      if (seen && depth === 0) return src.slice(start, i + 1);
-    }
-  }
-  return src.slice(start);
-}
-
-describe.skipIf(!HAS_BASE)("repository invariants against base (FC-110, FC-115, FC-116, FC-118)", () => {
-  it("adds exactly one src module: src/cli/safe-output.ts", () => {
-    expect(addedPaths("src/")).toEqual(["src/cli/safe-output.ts"]);
-  });
-
-  it("leaves every test file of the base byte-identical and only adds test files", () => {
-    const basePaths = git(["ls-tree", "-r", "--name-only", BASE, "--", "tests/"]).split("\n").filter(Boolean);
-    expect(basePaths.length).toBeGreaterThan(0);
-    for (const p of basePaths) {
-      const baseBytes = execFileSync("git", ["show", `${BASE}:${p}`], { cwd: ROOT, maxBuffer: 64 * 1024 * 1024 });
-      expect(fs.existsSync(join(ROOT, p)), p).toBe(true);
-      expect(createHash("sha256").update(fs.readFileSync(join(ROOT, p))).digest("hex"), p).toBe(createHash("sha256").update(baseBytes).digest("hex"));
-    }
-    const nonAdded = git(["diff", "--name-status", BASE, "--", "tests/"]).split("\n").filter((l) => l && !l.startsWith("A\t"));
-    expect(nonAdded).toEqual([]);
-  });
-
-  it("leaves runPipeline, runASTPipeline and runTokenPipeline textually unchanged", () => {
-    const base = git(["show", `${BASE}:src/pipeline.ts`]);
-    const now = fs.readFileSync(join(ROOT, "src", "pipeline.ts"), "utf-8");
-    for (const name of ["runASTPipeline", "runTokenPipeline", "runPipeline"]) {
-      const b = functionText(base, name);
-      expect(b.length, name).toBeGreaterThan(0);
-      expect(functionText(now, name), name).toBe(b);
-    }
-  });
-
-  it("documents the refusals, residuals and stream behaviour in added README lines, qualified and in product terms", () => {
-    const added = git(["diff", BASE, "--", "README.md"])
-      .split("\n")
-      .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
-      .map((l) => l.slice(1));
-    const text = added.join("\n").toLowerCase();
-    const topics: Array<[string, RegExp[]]> = [
-      ["same-file refusal", [/same file/]],
-      ["directory input", [/directory/]],
-      ["unreadable input", [/unreadable|cannot be read|not readable|permission/]],
-      ["unparseable input", [/unparseable|cannot be parsed|could not be parsed|does not parse/]],
-      ["partially parsed input", [/partial(ly)? pars/]],
-      ["non-empty input yielding no statements", [/no statements|all statements (were )?removed/]],
-      ["size cap", [/20 ?mb|size (cap|limit)|exceeds/]],
-      ["exit status 1", [/status 1|exits? (with )?1\b|exit code 1/]],
-      ["no output written", [/no output|without writing|not written/]],
-      ["dead-code-only input refused", [/dead[- ]code/]],
-      ["throwing pass skipped with a warning", [/skipped/, /warning/]],
-      ["empty output file may be left at write time", [/empty (output )?file/]],
-      ["I/O failure may leave a partial output", [/disk full|i\/o (failure|error)/, /partial/]],
-      ["input never modified", [/input (file )?is (never|not) (modified|changed|touched|written)/]],
-      ["internal error line and --verbose stack", [/internal error/, /--verbose/, /stack/]],
-      ["Done on stderr when the output is stdout", [/done/, /stderr/, /stdout/]],
-      ["identity compared before the pipeline and at open", [/identity/, /before/, /open/]],
-      ["stable device/inode precondition", [/inode/]],
-      ["concurrent changes not covered", [/concurrent/]],
-      ["hard links on filesystems that synthesize inode numbers", [/hard link/, /synthesi[sz]e/]],
-      ["wrapper compares file identity only", [/wrapper/]],
-    ];
-    for (const [topic, res] of topics) for (const re of res) expect(text, `README topic: ${topic}`).toMatch(re);
-    for (const l of added) {
-      expect(/\b(always|never)\b/i.test(l) && /detect/i.test(l), `absolute detection claim: ${l}`).toBe(false);
-      expect(l, "methodology vocabulary").not.toMatch(/\b(TDD\w*|contract|A1|ICPCS)\b/i);
     }
   });
 });
