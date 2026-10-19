@@ -239,6 +239,17 @@ function runASTPassTransactional(pass: ASTPass, ast: File, source: string, conte
   }
 }
 
+type Generated = { ok: true; code: string } | { ok: false; condition: string };
+
+/** Generate the code at the end of an iteration; a throw here degrades the iteration like a failed re-parse. */
+function generateIterationCode(ast: File): Generated {
+  try {
+    return { ok: true, code: generate(ast) };
+  } catch (thrown: unknown) {
+    return { ok: false, condition: `generating the code at the end of the iteration threw an error (${thrownMessage(thrown)})` };
+  }
+}
+
 type Reparse = { ok: true; parsed: ParseResult } | { ok: false; condition: string };
 
 const COMPLETENESS_RANK: Record<ParseOutcome["completeness"], number> = { whole: 2, truncated: 1, empty: 0 };
@@ -327,17 +338,35 @@ function runReported(
       break;
     }
 
-    const currentCode = generate(ast);
+    // Discard this iteration: go back to the state it started from
+    // (re-parsing that source rebinds the AST offsets to it) and stop iterating.
+    const discard = (condition: string): void => {
+      ast = parseWithDiagnostics(currentSource).ast;
+      warnings.push(`Discarded iteration ${iterations}: ${condition}; kept the state from before that iteration`);
+    };
+
+    // The generate before an inter-iteration re-parse is part of that re-parse's
+    // transaction; on the final iteration (no re-parse follows) a throw is unexpected
+    // and propagates with the warnings collected so far.
+    const reparseFollows = i < maxIterations - 1;
+    let currentCode: string;
+    if (reparseFollows) {
+      const generated = generateIterationCode(ast);
+      if (!generated.ok) {
+        discard(generated.condition);
+        break;
+      }
+      currentCode = generated.code;
+    } else {
+      currentCode = generate(ast);
+    }
     if (currentCode === previousCode) {
       break;
     }
-    if (i < maxIterations - 1) {
+    if (reparseFollows) {
       const reparse = reparseGenerated(currentCode, initialParse);
       if (!reparse.ok) {
-        // Discard this iteration: go back to the state it started from
-        // (re-parsing that source rebinds the AST offsets to it) and stop iterating.
-        ast = parseWithDiagnostics(currentSource).ast;
-        warnings.push(`Discarded iteration ${iterations}: ${reparse.condition}; kept the state from before that iteration`);
+        discard(reparse.condition);
         break;
       }
       previousCode = currentCode;

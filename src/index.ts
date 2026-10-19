@@ -105,7 +105,7 @@ function unverifiedText(op: string, code: string | undefined, side: "input" | "o
 function writeText(failure: SafeFailure): string {
   const cause = failure.code ?? failure.detail ?? "unknown cause";
   const text = `Writing output failed: ${failure.path} (${failure.op ?? "write"}: ${cause})`;
-  return failure.stage === "WPOST" ? `${text}; the output may be empty or partial` : `${text}; the output was not modified`;
+  return failure.stage === "WPOST" ? `${text}; the output may be empty or partial` : `${text}; nothing was written to the output`;
 }
 
 function writeFailureText(failure: SafeFailure): string {

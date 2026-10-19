@@ -1,6 +1,6 @@
 # deobfuscate-js
 
-![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-696%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-698%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
 
 JavaScript de-obfuscation toolkit. Reverses javascript-obfuscator/obfuscator.io transforms (string array encoding, control flow flattening, proxy function objects, anti-debug traps) and handles webpack/browserify bundles. Combines AST-based transforms with token-level formatting to produce readable output from obfuscated or minified JavaScript.
 
@@ -28,7 +28,7 @@ The CLI exits with status 0 only after it has written the complete output. In ea
 - **Partially parsed input**: only a prefix of the input parses. The message names the line of the syntax error; the rest of the input would be dropped silently, so the run is refused.
 - **No statements left**: a non-empty input yields no statements after processing, for example a dead-code-only input such as `if (false) { x(); }`.
 
-An empty, whitespace-only or comments-only input is not refused; it produces a correspondingly empty output.
+An input without statements is not refused: an empty or whitespace-only input produces an empty output, and a comments-only input is written with its comments, which may be kept.
 
 Partial failures are tolerated: when a transform pass throws, its changes are undone, the pass is skipped with a `WARNING:` line naming the pass and the error, and the remaining passes still run. Parser recovery problems are reported as `WARNING:` lines too. Such a run still succeeds with exit status 0 unless one of the refusals above applies to its result.
 
@@ -36,11 +36,13 @@ An unexpected internal error is reported as one `ERROR: internal error: ...` lin
 
 On success the `Done: ...` status line goes to stdout. When the output is the process stdout itself (for example `/dev/stdout`, or stdout redirected to the output file), the `Done:` line goes to stderr instead, so it does not end up in the output.
 
-**Writing the output.** The output is opened without truncating it, and its identity is compared with the input again before anything is written; only then is a regular file truncated and written (devices such as `/dev/null` and pipes are written without truncation). A failure at that point (the output turned out to be the input, it is a directory, its directory does not exist, it cannot be opened) exits with status 1 with the output not modified, except that an empty output file may be left behind if it did not exist before. If an I/O error occurs after writing has started (for example disk full), the CLI exits with status 1 but the output file may be empty or partial. The input file is not modified in either case.
+**Writing the output.** The output is opened without truncating it, and its identity is compared with the input again before anything is written; only then is a regular file truncated and written (devices such as `/dev/null` and pipes are written without truncation). A failure at that point (the output turned out to be the input, it is a directory, its directory does not exist, it cannot be opened) exits with status 1 with the output not modified, except that an empty output file may be left behind if it did not exist before. If an I/O error occurs after the output was truncated or writing started (for example disk full), the CLI exits with status 1 but the output file may be empty or partial. The input file is not modified in either case (within the limits of the same-file check below).
 
 **Limits of the same-file check.** The CLI compares file identity (device and inode numbers) before the pipeline runs and again when it opens the output. This relies on a filesystem with stable device/inode identity (local POSIX filesystems, NTFS). It does not cover files changed concurrently by another process while a run is in progress, and a hard link to the input may go unnoticed on filesystems that synthesize inode numbers (some FUSE or network filesystems).
 
 **Benchmark wrapper.** `scripts/deobfuscate-js.sh` exits with status 1 without running the CLI when its input and output are the same file, and checks again before writing its fallback output. The wrapper compares file identity only (the shell `-ef` test, no path comparison), so the limits above apply, and a hard link to an input whose directory cannot be searched is not recognized. For distinct paths it behaves as before: when the CLI fails it writes an empty output file and exits 0; if that empty file cannot be created it exits with status 1.
+
+The full behaviour, including every `ERROR:` line and the library API, is specified in [docs/SPEC-SHEET.md](docs/SPEC-SHEET.md).
 
 ## Architecture
 
@@ -281,11 +283,11 @@ The parser (`src/parser.ts`) handles malformed JavaScript gracefully through a f
 3. Truncate to the valid prefix before the error line
 4. Return empty program as last resort
 
-Also provides `parseWithDiagnostics()` returning `{ ast, warnings }` for truncation visibility.
+Also provides `parseWithDiagnostics()` returning `{ ast, warnings }` plus a structured outcome (`completeness`, `mode`, `recoveredErrors`, `truncatedAtLine`). The CLI refuses inputs whose parse needed the truncation or empty-program fallback (see [docs/SPEC-SHEET.md](docs/SPEC-SHEET.md)).
 
 ### Structured Pipeline Output
 
-`runPipelineWithReport()` returns `{ code, warnings, report }` with per-pass changed flags, alongside the original `runPipeline()` for backward compatibility.
+`runPipelineWithReport()` returns `{ code, warnings, report }` with per-pass changed flags, plus the input's parse outcome and statement counts; it skips a throwing pass with a warning. The original `runPipeline()` is kept for backward compatibility (there a throwing pass still propagates).
 
 ## Results
 
@@ -328,7 +330,7 @@ Output passes `node --check` -- syntactically valid JavaScript.
 ## Testing
 
 ```bash
-npm test           # run all tests (696)
+npm test           # run all tests (698)
 npm run test:watch # watch mode
 ```
 

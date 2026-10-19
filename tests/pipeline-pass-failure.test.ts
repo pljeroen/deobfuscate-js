@@ -406,6 +406,102 @@ describe("inter-iteration re-parse discard (FC-114, CS-11)", () => {
     expect(r.warnings.filter((w: string) => DISCARD.test(w) && /recover/i.test(w))).toHaveLength(1);
   });
 
+  // THAW-2 (F-A10-01): the iteration-end generate, right before the re-parse, throws
+  it("a throwing iteration-end generate is a degraded re-parse: discarded, pre-iteration state kept, one warning, token passes run", async () => {
+    const src = "var a = 1;\nconsole.log(a);\n";
+    const expected = runPipelineWithReport(src, [], [formatPass]).code;
+    const arm = { armed: false, afterArm: 0, thrown: 0 };
+    vi.resetModules();
+    vi.doMock(PARSER, async (importOriginal) => {
+      const orig: Any = await importOriginal();
+      return {
+        ...orig,
+        generate: (ast: Any) => {
+          if (arm.armed) {
+            arm.afterArm++;
+            // 1st call after the pass: its change detection; 2nd: the iteration-end generate
+            if (arm.afterArm === 2) {
+              arm.thrown++;
+              throw new Error("iteration-end generate exploded");
+            }
+          }
+          return orig.generate(ast);
+        },
+      };
+    });
+    const pipeline: Any = await import(/* @vite-ignore */ PIPELINE);
+    const fmt: Any = (await import(/* @vite-ignore */ join(ROOT, "src", "passes", "format.ts"))).formatPass;
+    let first = true;
+    const mutator = pass("mutator", (ast) => {
+      if (first) {
+        first = false;
+        ast.program.body.push(t.expressionStatement(t.identifier("ADDED_BY_MUTATOR")) as Any);
+        arm.armed = true;
+      }
+      return ast;
+    });
+    const seen: string[] = [];
+    const recorder: TokenPass = { name: "token-recorder", description: "test", run: (s) => (seen.push(s), s) };
+    let r: Any;
+    expect(() => {
+      r = pipeline.runPipelineWithReport(src, [mutator], [fmt, recorder]);
+    }).not.toThrow();
+    expect(arm.thrown).toBe(1);
+    expect(r.code).toBe(expected);
+    expect(r.code).not.toContain("ADDED_BY_MUTATOR");
+    const discard = r.warnings.filter((w: string) => DISCARD.test(w));
+    expect(discard).toHaveLength(1);
+    expect(discard[0]).toMatch(/generat/i);
+    expect(seen).toHaveLength(1);
+  });
+
+  // THAW-3 (F-A10-R1-01): on the FINAL iteration no re-parse follows, so a throwing
+  // iteration-end generate is an internal error, not a discard
+  it("a throwing iteration-end generate on the final iteration (no re-parse follows) propagates with the collected warnings", async () => {
+    const src = "var a = 1;\nconsole.log(a);\n";
+    const arm = { armed: false, afterArm: 0, thrown: 0 };
+    const boom = new Error("final-iteration generate exploded");
+    vi.resetModules();
+    vi.doMock(PARSER, async (importOriginal) => {
+      const orig: Any = await importOriginal();
+      return {
+        ...orig,
+        generate: (ast: Any) => {
+          if (arm.armed) {
+            arm.afterArm++;
+            if (arm.afterArm === 2) {
+              arm.thrown++;
+              throw boom;
+            }
+          }
+          return orig.generate(ast);
+        },
+      };
+    });
+    const pipeline: Any = await import(/* @vite-ignore */ PIPELINE);
+    const skipper = pass("skipper", () => {
+      throw new Error("skip me");
+    });
+    let invocation = 0;
+    // changes the program on every invocation, so all three iterations run
+    const grower = pass("grower", (ast) => {
+      invocation++;
+      ast.program.body.push(t.expressionStatement(t.identifier(`GROWN_${invocation}`)) as Any);
+      if (invocation === 3) arm.armed = true; // the final iteration (maxIterations = 3)
+      return ast;
+    });
+    let caught: Any;
+    try {
+      pipeline.runPipelineWithReport(src, [skipper, grower], []);
+    } catch (e) {
+      caught = e;
+    }
+    expect(invocation).toBe(3);
+    expect(arm.thrown).toBe(1);
+    expect(caught).toBe(boom);
+    expect(caught.warnings).toContain("skipper: skip me");
+  });
+
   it("a re-parse that throws is discarded with a warning (mocked parseWithDiagnostics)", async () => {
     const src = "var a = 1 + 2;\nconsole.log(a);\n";
     const expected = runPipelineWithReport(src, [], [formatPass]).code;
