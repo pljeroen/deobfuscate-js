@@ -1,6 +1,6 @@
 # deobfuscate-js
 
-![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-581%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-696%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
 
 JavaScript de-obfuscation toolkit. Reverses javascript-obfuscator/obfuscator.io transforms (string array encoding, control flow flattening, proxy function objects, anti-debug traps) and handles webpack/browserify bundles. Combines AST-based transforms with token-level formatting to produce readable output from obfuscated or minified JavaScript.
 
@@ -16,6 +16,31 @@ npm run deobfuscate -- --unsafe path/to/input.js  # enable string-array resoluti
 By default, only safe passes run. The `--unsafe` flag enables the string-array pass, which executes untrusted code in a V8 isolate sandbox.
 
 > **Warning:** The `--unsafe` flag executes sample code inside a V8 isolate. This reduces host exposure but is not intended as a hardened malware sandbox. Use only on samples you trust.
+
+### Refusals and exit status
+
+The CLI exits with status 0 only after it has written the complete output. In each of the cases below it refuses instead: it prints one `ERROR:` line as the last line on stderr, naming the affected path and, for operating-system errors, the error code (such as `ENOENT` or `EACCES`), and exits with status 1. These refusals are decided before the output is opened, so no output is written and an existing output file keeps its contents:
+
+- **Same file**: the output path names the same file as the input (the identical path, another spelling of it, a symlink or a hard link to it).
+- **Missing, unreadable or directory input**: the input does not exist, cannot be opened (for example permission denied), or is a directory.
+- **Input too large**: the input exceeds the 20MB size limit. A regular file is checked before it is read; a pipe or device is refused as soon as more than 20MB have been read from it.
+- **Unparseable input**: the input cannot be parsed at all.
+- **Partially parsed input**: only a prefix of the input parses. The message names the line of the syntax error; the rest of the input would be dropped silently, so the run is refused.
+- **No statements left**: a non-empty input yields no statements after processing, for example a dead-code-only input such as `if (false) { x(); }`.
+
+An empty, whitespace-only or comments-only input is not refused; it produces a correspondingly empty output.
+
+Partial failures are tolerated: when a transform pass throws, its changes are undone, the pass is skipped with a `WARNING:` line naming the pass and the error, and the remaining passes still run. Parser recovery problems are reported as `WARNING:` lines too. Such a run still succeeds with exit status 0 unless one of the refusals above applies to its result.
+
+An unexpected internal error is reported as one `ERROR: internal error: ...` line naming the input path, with exit status 1. Run again with `--verbose` to also print the stack trace (before the `ERROR:` line).
+
+On success the `Done: ...` status line goes to stdout. When the output is the process stdout itself (for example `/dev/stdout`, or stdout redirected to the output file), the `Done:` line goes to stderr instead, so it does not end up in the output.
+
+**Writing the output.** The output is opened without truncating it, and its identity is compared with the input again before anything is written; only then is a regular file truncated and written (devices such as `/dev/null` and pipes are written without truncation). A failure at that point (the output turned out to be the input, it is a directory, its directory does not exist, it cannot be opened) exits with status 1 with the output not modified, except that an empty output file may be left behind if it did not exist before. If an I/O error occurs after writing has started (for example disk full), the CLI exits with status 1 but the output file may be empty or partial. The input file is not modified in either case.
+
+**Limits of the same-file check.** The CLI compares file identity (device and inode numbers) before the pipeline runs and again when it opens the output. This relies on a filesystem with stable device/inode identity (local POSIX filesystems, NTFS). It does not cover files changed concurrently by another process while a run is in progress, and a hard link to the input may go unnoticed on filesystems that synthesize inode numbers (some FUSE or network filesystems).
+
+**Benchmark wrapper.** `scripts/deobfuscate-js.sh` exits with status 1 without running the CLI when its input and output are the same file, and checks again before writing its fallback output. The wrapper compares file identity only (the shell `-ef` test, no path comparison), so the limits above apply, and a hard link to an input whose directory cannot be searched is not recognized. For distinct paths it behaves as before: when the CLI fails it writes an empty output file and exits 0; if that empty file cannot be created it exits with status 1.
 
 ## Architecture
 
@@ -303,7 +328,7 @@ Output passes `node --check` -- syntactically valid JavaScript.
 ## Testing
 
 ```bash
-npm test           # run all tests (581)
+npm test           # run all tests (696)
 npm run test:watch # watch mode
 ```
 

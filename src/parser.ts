@@ -48,9 +48,37 @@ export function parse(source: string): File {
   }
 }
 
-export interface ParseResult {
+/** How much of the input the returned AST represents. */
+export type ParseCompleteness = "whole" | "truncated" | "empty";
+
+/** Which parse produced the AST: the primary (module-capable) parse or the sourceType "script" fallback. */
+export type ParseMode = "module-capable" | "script-fallback";
+
+/**
+ * Structured parse outcome. Decisions about a parse read these fields,
+ * never the warning text.
+ */
+export interface ParseOutcome {
+  completeness: ParseCompleteness;
+  mode: ParseMode;
+  /** Number of errors Babel recovered from in the returned AST. */
+  recoveredErrors: number;
+  /** Line of the primary syntax error, set whenever the truncation fallback ran. */
+  truncatedAtLine?: number;
+}
+
+export interface ParseResult extends ParseOutcome {
   ast: File;
   warnings: string[];
+}
+
+/** Record Babel error-recovery diagnostics of `ast` as warnings; returns how many there were. */
+function collectRecoveredErrors(ast: File, warnings: string[]): number {
+  const errors: unknown[] = (ast as any).errors ?? [];
+  for (const err of errors as any[]) {
+    warnings.push(`Parse error (recovered): ${err.message ?? err}`);
+  }
+  return errors.length;
 }
 
 /**
@@ -63,40 +91,45 @@ export function parseWithDiagnostics(source: string): ParseResult {
   try {
     const ast = babelParse(source, PARSE_OPTIONS);
     // Check for Babel error-recovery diagnostics
-    if ((ast as any).errors?.length > 0) {
-      for (const err of (ast as any).errors) {
-        warnings.push(`Parse error (recovered): ${err.message ?? err}`);
-      }
-    }
-    return { ast, warnings };
+    const recoveredErrors = collectRecoveredErrors(ast, warnings);
+    return { ast, warnings, completeness: "whole", mode: "module-capable", recoveredErrors };
   } catch (e: unknown) {
     // Fallback: try sourceType "script"
     try {
       const ast = babelParse(source, { ...PARSE_OPTIONS, sourceType: "script" });
       warnings.push("Fell back to sourceType 'script' after module parse failure");
-      return { ast, warnings };
+      const recoveredErrors = collectRecoveredErrors(ast, warnings);
+      return { ast, warnings, completeness: "whole", mode: "script-fallback", recoveredErrors };
     } catch {
       // noop — fall through to truncation
     }
 
     // Truncation fallback
+    let truncatedAtLine: number | undefined;
     if (e instanceof SyntaxError && typeof (e as any).loc?.line === "number") {
       const errorLine: number = (e as any).loc.line;
+      truncatedAtLine = errorLine;
       warnings.push(`Truncated at line ${errorLine}: ${(e as Error).message}`);
       const lines = source.split("\n");
       const partialSource = lines.slice(0, errorLine - 1).join("\n");
       if (partialSource.trim()) {
         try {
-          return { ast: babelParse(partialSource, PARSE_OPTIONS), warnings };
+          const ast = babelParse(partialSource, PARSE_OPTIONS);
+          const recoveredErrors = collectRecoveredErrors(ast, warnings);
+          return { ast, warnings, completeness: "truncated", mode: "module-capable", recoveredErrors, truncatedAtLine };
         } catch {
           // noop — fall through to empty parse
         }
       }
     }
 
-    // Last resort: empty program
+    // Last resort: empty program (keeps the truncation line when one was determined)
     warnings.push("Could not parse source; returned empty program");
-    return { ast: babelParse("", { ...PARSE_OPTIONS, sourceType: "script" }), warnings };
+    const ast = babelParse("", { ...PARSE_OPTIONS, sourceType: "script" });
+    const recoveredErrors = collectRecoveredErrors(ast, warnings);
+    const outcome: ParseResult = { ast, warnings, completeness: "empty", mode: "script-fallback", recoveredErrors };
+    if (truncatedAtLine !== undefined) outcome.truncatedAtLine = truncatedAtLine;
+    return outcome;
   }
 }
 
