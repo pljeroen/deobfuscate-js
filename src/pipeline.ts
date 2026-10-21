@@ -86,6 +86,16 @@ export interface PassReport {
   changed: boolean;
 }
 
+/** Statements plus directives of the program before and after one AST pass invocation. */
+export interface PassStatementCount {
+  name: string;
+  /** 1-based iteration of the invocation */
+  iteration: number;
+  before: number;
+  /** for an invocation that threw, the count of the restored program (equal to `before`) */
+  after: number;
+}
+
 export interface PipelineResult {
   code: string;
   warnings: string[];
@@ -99,6 +109,14 @@ export interface PipelineResult {
   inputStatementCount: number;
   /** Statements plus directives of the program that produced `code` (before the token passes). */
   finalStatementCount: number;
+  /** One entry per AST pass invocation, in the order of `report` (whose first entries they are). */
+  passStatementCounts: PassStatementCount[];
+  /**
+   * Set only when a non-empty input ends without statements: the last AST pass
+   * invocation, in an iteration that was kept, that took the program from at
+   * least one statement or directive to none.
+   */
+  emptiedBy?: { name: string; iteration: number };
 }
 
 /**
@@ -285,6 +303,9 @@ function runReported(
   warnings: string[],
 ): PipelineResult {
   const report: PassReport[] = [];
+  const passStatementCounts: PassStatementCount[] = [];
+  // the last invocation that emptied the program, among the iterations kept so far
+  let emptiedBy: { name: string; iteration: number } | undefined;
 
   const maxIterations = 3;
   let currentSource = source;
@@ -311,6 +332,7 @@ function runReported(
   for (let i = 0; i < maxIterations; i++) {
     iterations++;
     let anyChanged = false;
+    const emptiedByBeforeIteration = emptiedBy;
 
     for (const pass of astPasses) {
       // QW2: Skip obfuscator-specific passes when no obfuscator detected
@@ -319,17 +341,22 @@ function runReported(
       }
 
       const before = generate(ast);
+      const statementsBefore = statementCount(ast);
       const outcome = runASTPassTransactional(pass, ast, currentSource, context);
       if (!outcome.ok) {
         ast = outcome.restored;
         warnings.push(`${pass.name}: ${outcome.message}`);
         report.push({ name: pass.name, changed: false });
+        passStatementCounts.push({ name: pass.name, iteration: iterations, before: statementsBefore, after: statementCount(ast) });
         continue;
       }
       ast = outcome.ast;
       const after = generate(ast);
       const changed = before !== after;
       report.push({ name: pass.name, changed });
+      const statementsAfter = statementCount(ast);
+      passStatementCounts.push({ name: pass.name, iteration: iterations, before: statementsBefore, after: statementsAfter });
+      if (statementsBefore > 0 && statementsAfter === 0) emptiedBy = { name: pass.name, iteration: iterations };
       if (changed) anyChanged = true;
     }
 
@@ -340,8 +367,10 @@ function runReported(
 
     // Discard this iteration: go back to the state it started from
     // (re-parsing that source rebinds the AST offsets to it) and stop iterating.
+    // An invocation of the discarded iteration that emptied the program is not named.
     const discard = (condition: string): void => {
       ast = parseWithDiagnostics(currentSource).ast;
+      emptiedBy = emptiedByBeforeIteration;
       warnings.push(`Discarded iteration ${iterations}: ${condition}; kept the state from before that iteration`);
     };
 
@@ -406,5 +435,7 @@ function runReported(
     initialParse,
     inputStatementCount,
     finalStatementCount,
+    passStatementCounts,
+    ...(inputStatementCount > 0 && finalStatementCount === 0 && emptiedBy !== undefined ? { emptiedBy } : {}),
   };
 }

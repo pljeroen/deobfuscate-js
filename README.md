@@ -1,6 +1,6 @@
 # deobfuscate-js
 
-![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-699%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-740%20passing-green) ![Node](https://img.shields.io/badge/node-22%2B-blue) ![Architecture](https://img.shields.io/badge/AST-Babel-purple) ![Status](https://img.shields.io/badge/status-active-green)
 
 JavaScript de-obfuscation toolkit. Reverses javascript-obfuscator/obfuscator.io transforms (string array encoding, control flow flattening, proxy function objects, anti-debug traps) and handles webpack/browserify bundles. Combines AST-based transforms with token-level formatting to produce readable output from obfuscated or minified JavaScript.
 
@@ -26,7 +26,7 @@ The CLI exits with status 0 only after it has written the complete output. In ea
 - **Input too large**: the input exceeds the 20MB size limit. A regular file is checked before it is read; a pipe or device is refused as soon as more than 20MB have been read from it.
 - **Unparseable input**: the input cannot be parsed at all.
 - **Partially parsed input**: only a prefix of the input parses. The message names the line of the syntax error; the rest of the input would be dropped silently, so the run is refused.
-- **No statements left**: a non-empty input yields no statements after processing, for example a dead-code-only input such as `if (false) { x(); }`.
+- **No statements left**: a non-empty input yields no statements after processing, for example a dead-code-only input such as `if (false) { x(); }`. The message names the pass that removed the last statement and the iteration in which it did so.
 
 An input without statements is not refused: an empty or whitespace-only input produces an empty output, and a comments-only input is written with its comments, which may be kept.
 
@@ -289,7 +289,7 @@ Also provides `parseWithDiagnostics()` returning `{ ast, warnings }` plus a stru
 
 ### Structured Pipeline Output
 
-`runPipelineWithReport()` returns `{ code, warnings, report }` with per-pass changed flags, plus the input's parse outcome and statement counts; it skips a throwing pass with a warning. The original `runPipeline()` is kept for backward compatibility (there a throwing pass still propagates).
+`runPipelineWithReport()` returns `{ code, warnings, report }` with per-pass changed flags, plus the input's parse outcome and statement counts; it skips a throwing pass with a warning. The result also carries the statement counts before and after each pass invocation and, when a non-empty input ends without statements, the pass that removed the last statement. The original `runPipeline()` is kept for backward compatibility (there a throwing pass still propagates).
 
 ## Results
 
@@ -332,7 +332,7 @@ Output passes `node --check` -- syntactically valid JavaScript.
 ## Testing
 
 ```bash
-npm test           # run all tests (699)
+npm test           # run all tests (740)
 npm run test:watch # watch mode
 ```
 

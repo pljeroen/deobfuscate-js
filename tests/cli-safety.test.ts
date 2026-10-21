@@ -240,7 +240,7 @@ type Cls = "C1" | "C2" | "C3" | "C4" | "DONE" | "?";
 function classify(line: string): Cls {
   if (line === UNSAFE_NOTICE) return "C1";
   if (line.startsWith("WARNING: ")) return "C2";
-  if (line === "" || /^Pipeline: \d+ iteration\(s\), entropy /.test(line) || line === "Pass report:" || /^ {2}[\w-]+: (changed|no change)$/.test(line) || /^\s+at /.test(line)) return "C3";
+  if (line === "" || /^Pipeline: \d+ iteration\(s\), entropy /.test(line) || line === "Pass report:" || /^ {2}[\w-]+: (changed|no change)( \(iteration \d+, statements \d+ → \d+\))?$/.test(line) || /^\s+at /.test(line)) return "C3";
   if (line.startsWith("ERROR: ")) return "C4";
   if (line.startsWith("Done: ")) return "DONE";
   return "?";

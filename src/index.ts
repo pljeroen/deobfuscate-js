@@ -12,22 +12,9 @@
 import { resolve } from "node:path";
 import { runPipelineWithReport, filterSafePasses, warningsOf } from "./pipeline.js";
 import type { PipelineResult } from "./pipeline.js";
-import type { ASTPass } from "./types.js";
 import { MAX_INPUT_BYTES, openInput, readInput, closeInput, statTarget, identityDecision, guardedWrite } from "./cli/safe-output.js";
 import type { FileId, InputHandle, SafeFailure } from "./cli/safe-output.js";
-import { constantFoldPass } from "./passes/constant-fold.js";
-import { constantPropagatePass } from "./passes/constant-propagate.js";
-import { deadCodeEliminatePass } from "./passes/dead-code-eliminate.js";
-import { hexDecodePass } from "./passes/hex-decode.js";
-import { astSimplifyPass } from "./passes/ast-simplify.js";
-import { astRenamePass } from "./passes/ast-rename.js";
-import { controlFlowObjectPass } from "./passes/control-flow-object.js";
-import { controlFlowUnflattenPass } from "./passes/control-flow-unflatten.js";
-import { stringArrayPass } from "./passes/string-array.js";
-import { stringArrayStaticPass } from "./passes/string-array-static.js";
-import { bundlerUnpackPass } from "./passes/bundler-unpack.js";
-import { semanticRenamePass } from "./passes/semantic-rename.js";
-import { antiDebugPass } from "./passes/anti-debug.js";
+import { allASTPasses, pipelineRefusalOf, oneLine } from "./cli-shared.js";
 import { formatPass } from "./passes/format.js";
 
 const args = process.argv.slice(2);
@@ -37,8 +24,6 @@ const positionalArgs = args.filter(a => !a.startsWith("--"));
 
 const inputPath = positionalArgs[0] ?? resolve("input/lodash.min.js");
 const outputPath = positionalArgs[1] ?? resolve("output/lodash.deobfuscated.js");
-
-const allASTPasses: ASTPass[] = [bundlerUnpackPass, constantFoldPass, constantPropagatePass, deadCodeEliminatePass, hexDecodePass, stringArrayStaticPass, stringArrayPass, controlFlowObjectPass, controlFlowUnflattenPass, constantFoldPass, deadCodeEliminatePass, antiDebugPass, constantPropagatePass, deadCodeEliminatePass, astSimplifyPass, semanticRenamePass, astRenamePass];
 
 const astPasses = unsafeMode ? allASTPasses : filterSafePasses(allASTPasses);
 
@@ -59,11 +44,6 @@ function refusal<T>(text: string): Step<T> {
 
 function stderrLine(line: string): void {
   process.stderr.write(`${line}\n`);
-}
-
-/** Collapse line breaks so one message stays one physical stderr line. */
-function oneLine(text: string): string {
-  return text.replace(/\s*[\r\n]+\s*/g, " ");
 }
 
 /** End the run with the single ERROR line (always the last stderr line) and status 1. */
@@ -116,16 +96,17 @@ function writeFailureText(failure: SafeFailure): string {
 
 /** Parse and emptiness refusals, decided from the structured pipeline result. */
 function pipelineRefusal(result: PipelineResult): string | undefined {
-  const parsed = result.initialParse;
-  if (parsed.completeness === "empty") {
-    const line = parsed.truncatedAtLine === undefined ? "" : ` (syntax error at line ${parsed.truncatedAtLine})`;
+  const refused = pipelineRefusalOf(result);
+  if (refused?.kind === "unparsed") {
+    const line = refused.syntaxErrorLine === undefined ? "" : ` (syntax error at line ${refused.syntaxErrorLine})`;
     return `Input could not be parsed: ${inputPath}${line}; nothing was written`;
   }
-  if (parsed.completeness === "truncated") {
-    return `Input was only partially parsed: ${inputPath} (syntax error at line ${parsed.truncatedAtLine}); nothing was written`;
+  if (refused?.kind === "partly-parsed") {
+    return `Input was only partially parsed: ${inputPath} (syntax error at line ${refused.syntaxErrorLine}); nothing was written`;
   }
-  if (result.inputStatementCount > 0 && result.finalStatementCount === 0) {
-    return `All statements were removed from the non-empty input ${inputPath}; nothing was written`;
+  if (refused?.kind === "emptied") {
+    const by = result.emptiedBy === undefined ? "" : ` by the ${result.emptiedBy.name} pass (iteration ${result.emptiedBy.iteration})`;
+    return `All statements were removed from the non-empty input ${inputPath}${by}; nothing was written`;
   }
   return undefined;
 }
@@ -143,9 +124,12 @@ function printWarnings(warnings: string[]): void {
 function printReport(result: PipelineResult): void {
   process.stderr.write(`\nPipeline: ${result.iterations} iteration(s), entropy ${result.initialEntropy.toFixed(2)} → ${result.finalEntropy.toFixed(2)}\n`);
   process.stderr.write("Pass report:\n");
-  for (const entry of result.report) {
-    process.stderr.write(`  ${entry.name}: ${entry.changed ? "changed" : "no change"}\n`);
-  }
+  // the AST pass invocations come first and carry statement counts; token passes do not
+  result.report.forEach((entry, i) => {
+    const counts = result.passStatementCounts[i];
+    const detail = counts === undefined ? "" : ` (iteration ${counts.iteration}, statements ${counts.before} → ${counts.after})`;
+    process.stderr.write(`  ${entry.name}: ${entry.changed ? "changed" : "no change"}${detail}\n`);
+  });
 }
 
 // ---------------------------------------------------------------------------
