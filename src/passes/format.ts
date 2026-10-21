@@ -3,9 +3,12 @@
  * properly indented output. Works at the token level, no AST needed.
  */
 
+import type { ParserOptions } from "@babel/parser";
+
+import { parse as babelParse } from "../babel.js";
 import { tokenize } from "../tokenizer.js";
-import { TokenType, DeobfuscationPass } from "../types.js";
-import type { Token } from "../types.js";
+import { TokenType } from "../types.js";
+import type { Token, TokenPass, TokenPassResult } from "../types.js";
 
 const INDENT = "  ";
 
@@ -37,6 +40,101 @@ const KEYWORD_NEEDS_SPACE = new Set([
   "else", "do",
 ]);
 
+export const FORMAT_FALLBACK_REASONS = {
+  notSameProgram: "the formatted text is not the same program as its input",
+  inputNotProgram: "the input does not parse as a program without errors",
+} as const;
+
+type SameProgramVerdict =
+  | { same: true }
+  | { same: false; reason: typeof FORMAT_FALLBACK_REASONS[keyof typeof FORMAT_FALLBACK_REASONS] };
+
+type ParseGoal = "script" | "module";
+
+interface StrictParse {
+  program: string;
+  comments: string;
+  tokens: string;
+}
+
+const PARSE_GOALS: readonly ParseGoal[] = ["script", "module"];
+const STRICT_PARSE_OPTIONS: ParserOptions = {
+  allowImportExportEverywhere: true,
+  allowReturnOutsideFunction: true,
+  allowSuperOutsideMethod: true,
+  errorRecovery: false,
+  plugins: ["dynamicImport", "optionalChaining", "nullishCoalescingOperator"],
+  tokens: true,
+};
+const IGNORED_NODE_KEYS = new Set(["start", "end", "loc", "range", "leadingComments", "trailingComments", "innerComments"]);
+const IGNORED_EXTRA_KEYS = new Set(["parenStart", "trailingComma", "trailingCommaLoc"]);
+
+function canonical(value: unknown, inExtra: boolean): unknown {
+  if (typeof value === "bigint") return { $bigint: value.toString() };
+  if (typeof value === "number" && !Number.isFinite(value)) return { $number: String(value) };
+  if (Array.isArray(value)) return value.map((item) => canonical(item, false));
+  if (value !== null && typeof value === "object") {
+    const source = value as Record<string, unknown>;
+    const copy: Record<string, unknown> = {};
+    for (const key of Object.keys(source).sort()) {
+      if (IGNORED_NODE_KEYS.has(key) || (inExtra && IGNORED_EXTRA_KEYS.has(key))) continue;
+      copy[key] = canonical(source[key], key === "extra");
+    }
+    return copy;
+  }
+  return value;
+}
+
+function tokenKind(token: { type: unknown }): string {
+  const type = token.type as string | { label?: string };
+  return typeof type === "string" ? type : String(type.label);
+}
+
+function parseStrict(text: string, sourceType: ParseGoal): StrictParse | undefined {
+  let file: {
+    program: unknown;
+    comments?: unknown[];
+    tokens?: unknown[];
+    errors?: unknown[];
+  };
+  try {
+    file = babelParse(text, { ...STRICT_PARSE_OPTIONS, sourceType }) as unknown as typeof file;
+  } catch (thrown: unknown) {
+    if (thrown instanceof SyntaxError) return undefined;
+    throw thrown;
+  }
+  if ((file.errors ?? []).length > 0) return undefined;
+
+  const comments = (file.comments ?? []).map((value) => {
+    const comment = value as { type: string; value: string };
+    return [comment.type, comment.value];
+  });
+  const tokens = (file.tokens ?? []).map((value) => {
+    const token = value as { type: unknown; value?: unknown };
+    return [tokenKind(token), canonical(token.value ?? null, false)];
+  });
+  return {
+    program: JSON.stringify(canonical(file.program, false)),
+    comments: JSON.stringify(comments),
+    tokens: JSON.stringify(tokens),
+  };
+}
+
+/** Decide whether output is exactly the same program as input under every input parse goal. */
+export function checkSameProgram(input: string, output: string): SameProgramVerdict {
+  const parsedInputs = PARSE_GOALS.map((goal) => [goal, parseStrict(input, goal)] as const)
+    .filter((entry): entry is readonly [ParseGoal, StrictParse] => entry[1] !== undefined);
+  if (parsedInputs.length === 0) return { same: false, reason: FORMAT_FALLBACK_REASONS.inputNotProgram };
+
+  for (const [goal, parsedInput] of parsedInputs) {
+    const parsedOutput = parseStrict(output, goal);
+    if (parsedOutput === undefined || parsedOutput.program !== parsedInput.program || parsedOutput.comments !== parsedInput.comments || parsedOutput.tokens !== parsedInput.tokens) {
+      return { same: false, reason: FORMAT_FALLBACK_REASONS.notSameProgram };
+    }
+  }
+  return { same: true };
+}
+
 // Tokens after which `-` or `+` is unary (not binary)
 const UNARY_CONTEXT_PUNCTUATORS = new Set([
   "=", "+=", "-=", "*=", "/=", "%=", "**=",
@@ -54,7 +152,7 @@ const UNARY_CONTEXT_PUNCTUATORS = new Set([
 ]);
 
 function indent(depth: number): string {
-  return INDENT.repeat(depth);
+  return INDENT.repeat(Math.max(0, depth));
 }
 
 function isWordLike(tok: Token): boolean {
@@ -80,16 +178,38 @@ function isUnarySign(prevTok: Token | undefined): boolean {
   return false;
 }
 
-export const formatPass: DeobfuscationPass = {
+type FormatPass = TokenPass & {
+  layout(input: string): string;
+  runWithResult(input: string): TokenPassResult;
+};
+
+function runFormat(input: string): string {
+  return formatPass.runWithResult(input).text;
+}
+
+export const formatPass: FormatPass = {
   name: "format",
   description: "Pretty-print minified code with proper indentation and line breaks",
 
-  run(input: string): string {
-    const tokens = tokenize(input).filter(
-      (t) =>
-        t.type !== TokenType.Whitespace &&
-        t.type !== TokenType.LineTerminator
-    );
+  run: runFormat,
+
+  runWithResult(input: string): TokenPassResult {
+    // Keep the established TokenPass failure seam observable when callers replace run,
+    // as the pipeline's pass-failure contract permits for every token pass.
+    if (formatPass.run !== runFormat) return { text: formatPass.run(input) };
+
+    const candidate = formatPass.layout(input);
+    const verdict = checkSameProgram(input, candidate);
+    return verdict.same ? { text: candidate } : { text: input, fallbackReason: verdict.reason };
+  },
+
+  layout(input: string): string {
+    const rawTokens = tokenize(input);
+    const tokens = rawTokens.filter((token, index) => {
+      if (token.type === TokenType.Whitespace) return false;
+      if (token.type !== TokenType.LineTerminator) return true;
+      return index > 0 && rawTokens[index - 1].type === TokenType.LineComment;
+    });
 
     const out: string[] = [];
     let depth = 0;
@@ -139,6 +259,11 @@ export const formatPass: DeobfuscationPass = {
       const tok = significantTokens[i];
       const prevTok = i > 0 ? significantTokens[i - 1] : undefined;
 
+      if (tok.type === TokenType.LineTerminator) {
+        newline();
+        continue;
+      }
+
       // Track for-loop parentheses to suppress semicolon line breaks
       if (tok.type === TokenType.Keyword && tok.value === "for") {
         inForHeader = true;
@@ -163,7 +288,7 @@ export const formatPass: DeobfuscationPass = {
           }
 
           case "}": {
-            depth--;
+            depth = Math.max(0, depth - 1);
             ternaryDepth = ternaryStack.pop() ?? 0;
             newline();
             emitIndent();
@@ -307,7 +432,8 @@ export const formatPass: DeobfuscationPass = {
       }
       // After ) — keywords like return, if, etc. need space
       // e.g. `if (a)return false` → `if (a) return false`
-      if (prevTok && prevTok.type === TokenType.Punctuator && prevTok.value === ")" && isWordLike(tok)) {
+      if (prevTok && prevTok.type === TokenType.Punctuator && prevTok.value === ")" && isWordLike(tok) &&
+          (tok.type !== TokenType.Identifier || /^[A-Za-z0-9_$]/.test(tok.value))) {
         emitWordSep();
       }
 

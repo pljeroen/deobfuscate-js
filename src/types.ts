@@ -52,11 +52,17 @@ export interface ASTPass {
   run(ast: File, source?: string, context?: PipelineContext): File;
 }
 
+export interface TokenPassResult {
+  text: string;
+  fallbackReason?: string;
+}
+
 // Token-based pass interface (operates on source string)
 export interface TokenPass {
   name: string;
   description: string;
   run(input: string): string;
+  runWithResult?(input: string): TokenPassResult;
 }
 
 // Legacy alias

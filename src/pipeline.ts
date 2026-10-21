@@ -415,7 +415,15 @@ function runReported(
   for (const pass of tokenPasses) {
     const before = code;
     try {
-      code = pass.run(code);
+      const outcome = pass.runWithResult === undefined
+        ? { text: pass.run(code) }
+        : pass.runWithResult(code);
+      code = outcome.text;
+      if (outcome.fallbackReason !== undefined) {
+        warnings.push(`${pass.name}: output left unformatted: ${outcome.fallbackReason}`);
+        report.push({ name: pass.name, changed: false });
+        continue;
+      }
     } catch (thrown: unknown) {
       // A throwing token pass leaves the text as it was.
       warnings.push(`${pass.name}: ${thrownMessage(thrown)}`);

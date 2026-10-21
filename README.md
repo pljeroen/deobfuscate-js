@@ -225,7 +225,7 @@ Replaces remaining single-letter and two-letter minified variable names with des
 
 #### Format (Token Phase)
 
-Re-emits the token stream with proper indentation and whitespace:
+Re-emits the token stream with proper indentation and whitespace. It changes only whitespace and line breaks between tokens:
 
 - Newlines after `;`, `{`, `}`
 - 2-space indentation tracking brace depth
@@ -234,11 +234,16 @@ Re-emits the token stream with proper indentation and whitespace:
 - Context-aware unary operator handling
 - For-loop awareness (no line breaks inside `for(;;)`)
 
+Before returning formatted text, the pass verifies that it is the same program as its input: the syntax trees must match under every applicable parse goal (`script` and `module`), and the ordered comments and tokens must match. If that cannot be shown, the AST-phase layout is kept. The command line tool prints `WARNING: format: output left unformatted: <reason>`, and `runPipelineWithReport()` records the same warning. `runPipeline()` and `formatPass.run()` return the unformatted text without a warning because those interfaces have no warning channel.
+
+“Same program” does not mean identical source text. JavaScript can observe its source through facilities such as `Function.prototype.toString()` and error-stack positions, and the AST phase already changes that text.
+
 ## Stability Guarantees
 
 - **Safe passes never execute code.** They operate purely on the AST and are always semantic-preserving.
 - **Unsafe passes may skip on errors.** If sandbox execution times out, runs out of memory, or produces invalid output, the pass is skipped and the AST is returned unchanged.
 - **Correctness over aggression.** The tool prefers leaving code untransformed over applying a transformation that might change runtime behavior. When in doubt, it does nothing.
+- **Formatting is checked before use.** The format pass changes only whitespace and line breaks between tokens. If matching syntax trees, comments, and tokens cannot establish that its output is the same program, the AST-phase layout is kept and reporting interfaces emit `format: output left unformatted: <reason>`.
 
 ## Additional Features
 

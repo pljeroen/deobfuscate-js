@@ -18,19 +18,33 @@ const KEYWORDS = new Set([
   "null", "true", "false", "undefined",
 ]);
 
+const VALUE_KEYWORDS = new Set(["this", "super", "true", "false", "null", "undefined"]);
+const CONTROL_HEAD_KEYWORDS = new Set(["if", "while", "for", "with", "switch", "catch"]);
+const ID_START = /^[$_\p{ID_Start}]$/u;
+const ID_CONTINUE = /^[$_\p{ID_Continue}]$/u;
+
 export function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
   let pos = 0;
   let line = 1;
   let column = 0;
+  let regexAllowed = true;
+  let pendingControlParen = false;
+  let propertyNameExpected = false;
+  const parenContexts: boolean[] = [];
 
-  function peek(): string {
-    return source[pos] ?? "";
+  function peek(offset = 0): string {
+    return source[pos + offset] ?? "";
+  }
+
+  function peekCodePoint(): string {
+    const value = source.codePointAt(pos);
+    return value === undefined ? "" : String.fromCodePoint(value);
   }
 
   function advance(): string {
-    const ch = source[pos++];
-    if (ch === "\n") {
+    const ch = source[pos++] ?? "";
+    if (ch === "\n" || ch === "\u2028" || ch === "\u2029" || (ch === "\r" && source[pos] !== "\n")) {
       line++;
       column = 0;
     } else {
@@ -39,8 +53,291 @@ export function tokenize(source: string): Token[] {
     return ch;
   }
 
+  function advanceCodePoint(): void {
+    const cp = source.codePointAt(pos);
+    if (cp === undefined) return;
+    advance();
+    if (cp > 0xffff) advance();
+  }
+
   function makeToken(type: TokenType, value: string, start: number, startLine: number, startCol: number): Token {
     return { type, value, start, end: pos, line: startLine, column: startCol };
+  }
+
+  function updateContext(token: Token): void {
+    if (token.type === TokenType.Whitespace || token.type === TokenType.LineTerminator || token.type === TokenType.LineComment || token.type === TokenType.BlockComment) {
+      return;
+    }
+
+    const wasPropertyName = propertyNameExpected;
+    if (token.type !== TokenType.Punctuator || (token.value !== "." && token.value !== "?.")) {
+      propertyNameExpected = false;
+    }
+
+    if (token.type === TokenType.Identifier || token.type === TokenType.Number || token.type === TokenType.String || token.type === TokenType.Template || token.type === TokenType.RegExp) {
+      pendingControlParen = false;
+      regexAllowed = false;
+      return;
+    }
+
+    if (token.type === TokenType.Keyword) {
+      if (!wasPropertyName && CONTROL_HEAD_KEYWORDS.has(token.value)) {
+        pendingControlParen = true;
+        regexAllowed = true;
+      } else {
+        pendingControlParen = false;
+        regexAllowed = wasPropertyName ? false : !VALUE_KEYWORDS.has(token.value);
+      }
+      return;
+    }
+
+    if (token.type !== TokenType.Punctuator) return;
+    switch (token.value) {
+      case "(":
+        parenContexts.push(pendingControlParen);
+        pendingControlParen = false;
+        regexAllowed = true;
+        return;
+      case ")":
+        regexAllowed = parenContexts.pop() === true;
+        pendingControlParen = false;
+        return;
+      case "]":
+      case "++":
+      case "--":
+        pendingControlParen = false;
+        regexAllowed = false;
+        return;
+      case ".":
+      case "?.":
+        pendingControlParen = false;
+        propertyNameExpected = true;
+        regexAllowed = false;
+        return;
+      case "}":
+        pendingControlParen = false;
+        regexAllowed = true;
+        return;
+      default:
+        pendingControlParen = false;
+        regexAllowed = true;
+    }
+  }
+
+  function pushToken(type: TokenType, start: number, startLine: number, startCol: number): void {
+    const token = makeToken(type, source.slice(start, pos), start, startLine, startCol);
+    tokens.push(token);
+    updateContext(token);
+  }
+
+  function consumeLineTerminator(): void {
+    if (peek() === "\r" && peek(1) === "\n") {
+      advance();
+      advance();
+      return;
+    }
+    advance();
+  }
+
+  function consumeString(quote: string): void {
+    advance();
+    while (pos < source.length && peek() !== quote) {
+      if (peek() === "\\") {
+        advance();
+        if (pos < source.length) advance();
+      } else {
+        advance();
+      }
+    }
+    if (peek() === quote) advance();
+  }
+
+  function consumeLineComment(): void {
+    advance();
+    advance();
+    while (pos < source.length && !isLineTerminator(peek())) advanceCodePoint();
+  }
+
+  function consumeBlockComment(): void {
+    advance();
+    advance();
+    while (pos < source.length && !(peek() === "*" && peek(1) === "/")) advance();
+    if (pos < source.length) {
+      advance();
+      advance();
+    }
+  }
+
+  function consumeIdentifierEscape(): void {
+    advance();
+    if (peek() !== "u") return;
+    advance();
+    if (peek() === "{") {
+      advance();
+      while (pos < source.length && peek() !== "}") advance();
+      if (peek() === "}") advance();
+      return;
+    }
+    for (let i = 0; i < 4 && pos < source.length; i++) advance();
+  }
+
+  function consumeIdentifier(): void {
+    if (isIdentifierEscape()) consumeIdentifierEscape();
+    else advanceCodePoint();
+    while (pos < source.length) {
+      if (isIdentifierEscape()) consumeIdentifierEscape();
+      else if (isIdentPart(peekCodePoint())) advanceCodePoint();
+      else break;
+    }
+  }
+
+  function consumeDigits(validDigit: (ch: string) => boolean): void {
+    while (pos < source.length && (validDigit(peek()) || peek() === "_")) advance();
+  }
+
+  function consumeNumber(): void {
+    if (peek() === "0" && (peek(1) === "x" || peek(1) === "X")) {
+      advance();
+      advance();
+      consumeDigits(isHexDigit);
+    } else if (peek() === "0" && (peek(1) === "b" || peek(1) === "B")) {
+      advance();
+      advance();
+      consumeDigits((value) => value === "0" || value === "1");
+    } else if (peek() === "0" && (peek(1) === "o" || peek(1) === "O")) {
+      advance();
+      advance();
+      consumeDigits(isOctalDigit);
+    } else {
+      if (peek() !== ".") consumeDigits(isDigit);
+      if (peek() === ".") {
+        advance();
+        consumeDigits(isDigit);
+      }
+      if (peek() === "e" || peek() === "E") {
+        advance();
+        if (peek() === "+" || peek() === "-") advance();
+        consumeDigits(isDigit);
+      }
+    }
+    if (peek() === "n") advance();
+  }
+
+  function consumeRegularExpression(): void {
+    advance();
+    let inClass = false;
+    while (pos < source.length && !isLineTerminator(peek())) {
+      if (peek() === "\\") {
+        advance();
+        if (pos < source.length) advance();
+        continue;
+      }
+      if (peek() === "[") inClass = true;
+      else if (peek() === "]") inClass = false;
+      else if (peek() === "/" && !inClass) {
+        advance();
+        while (pos < source.length && (isIdentPart(peekCodePoint()) || isIdentifierEscape())) {
+          if (isIdentifierEscape()) consumeIdentifierEscape();
+          else advanceCodePoint();
+        }
+        return;
+      }
+      advance();
+    }
+  }
+
+  function consumeTemplateExpression(): void {
+    let braceDepth = 1;
+    let expressionRegexAllowed = true;
+    while (pos < source.length && braceDepth > 0) {
+      const ch = peek();
+      if (ch === '"' || ch === "'") {
+        consumeString(ch);
+        expressionRegexAllowed = false;
+        continue;
+      }
+      if (ch === "`") {
+        consumeTemplate();
+        expressionRegexAllowed = false;
+        continue;
+      }
+      if (ch === "/" && peek(1) === "/") {
+        consumeLineComment();
+        continue;
+      }
+      if (ch === "/" && peek(1) === "*") {
+        consumeBlockComment();
+        continue;
+      }
+      if (isLineTerminator(ch)) {
+        consumeLineTerminator();
+        continue;
+      }
+      if (/\s/u.test(ch)) {
+        advance();
+        continue;
+      }
+      if (isIdentStart(peekCodePoint()) || isIdentifierEscape()) {
+        const wordStart = pos;
+        consumeIdentifier();
+        const word = source.slice(wordStart, pos);
+        expressionRegexAllowed = KEYWORDS.has(word) ? !VALUE_KEYWORDS.has(word) : false;
+        continue;
+      }
+      if (isDigit(ch) || (ch === "." && isDigit(peek(1)))) {
+        consumeNumber();
+        expressionRegexAllowed = false;
+        continue;
+      }
+      if (ch === "/") {
+        if (expressionRegexAllowed) {
+          consumeRegularExpression();
+          expressionRegexAllowed = false;
+        } else {
+          advance();
+          if (peek() === "=") advance();
+          expressionRegexAllowed = true;
+        }
+        continue;
+      }
+      if (ch === "{") {
+        braceDepth++;
+        advance();
+        expressionRegexAllowed = true;
+        continue;
+      }
+      if (ch === "}") {
+        braceDepth--;
+        advance();
+        expressionRegexAllowed = false;
+        continue;
+      }
+      if (ch === ")" || ch === "]") expressionRegexAllowed = false;
+      else if (ch !== ".") expressionRegexAllowed = true;
+      advance();
+    }
+  }
+
+  function consumeTemplate(): void {
+    advance();
+    while (pos < source.length) {
+      if (peek() === "\\") {
+        advance();
+        if (pos < source.length) advance();
+        continue;
+      }
+      if (peek() === "`") {
+        advance();
+        return;
+      }
+      if (peek() === "$" && peek(1) === "{") {
+        advance();
+        advance();
+        consumeTemplateExpression();
+        continue;
+      }
+      advance();
+    }
   }
 
   while (pos < source.length) {
@@ -49,138 +346,90 @@ export function tokenize(source: string): Token[] {
     const startCol = column;
     const ch = peek();
 
-    // Whitespace (non-newline)
-    if (ch === " " || ch === "\t" || ch === "\r") {
-      while (pos < source.length && (peek() === " " || peek() === "\t" || peek() === "\r")) {
-        advance();
-      }
-      tokens.push(makeToken(TokenType.Whitespace, source.slice(start, pos), start, startLine, startCol));
+    if (ch === " " || ch === "\t" || ch === "\v" || ch === "\f") {
+      while (pos < source.length && (peek() === " " || peek() === "\t" || peek() === "\v" || peek() === "\f")) advance();
+      pushToken(TokenType.Whitespace, start, startLine, startCol);
       continue;
     }
 
-    // Line terminators
-    if (ch === "\n") {
+    if (isLineTerminator(ch)) {
+      consumeLineTerminator();
+      pushToken(TokenType.LineTerminator, start, startLine, startCol);
+      continue;
+    }
+
+    if (pos === 0 && ch === "#" && peek(1) === "!") {
       advance();
-      tokens.push(makeToken(TokenType.LineTerminator, "\n", start, startLine, startCol));
+      advance();
+      while (pos < source.length && !isLineTerminator(peek())) advanceCodePoint();
+      pushToken(TokenType.LineComment, start, startLine, startCol);
       continue;
     }
 
-    // Line comment
-    if (ch === "/" && source[pos + 1] === "/") {
-      advance(); advance();
-      while (pos < source.length && peek() !== "\n") advance();
-      tokens.push(makeToken(TokenType.LineComment, source.slice(start, pos), start, startLine, startCol));
+    if (ch === "/" && peek(1) === "/") {
+      consumeLineComment();
+      pushToken(TokenType.LineComment, start, startLine, startCol);
       continue;
     }
 
-    // Block comment
-    if (ch === "/" && source[pos + 1] === "*") {
-      advance(); advance();
-      while (pos < source.length && !(peek() === "*" && source[pos + 1] === "/")) advance();
-      advance(); advance(); // consume */
-      tokens.push(makeToken(TokenType.BlockComment, source.slice(start, pos), start, startLine, startCol));
+    if (ch === "/" && peek(1) === "*") {
+      consumeBlockComment();
+      pushToken(TokenType.BlockComment, start, startLine, startCol);
       continue;
     }
 
-    // String literals
     if (ch === '"' || ch === "'") {
-      const quote = advance();
-      while (pos < source.length && peek() !== quote) {
-        if (peek() === "\\") advance(); // skip escape
-        advance();
-      }
-      advance(); // closing quote
-      tokens.push(makeToken(TokenType.String, source.slice(start, pos), start, startLine, startCol));
+      consumeString(ch);
+      pushToken(TokenType.String, start, startLine, startCol);
       continue;
     }
 
-    // Template literals
     if (ch === "`") {
-      advance();
-      while (pos < source.length && peek() !== "`") {
-        if (peek() === "\\") advance();
-        advance();
-      }
-      advance(); // closing backtick
-      tokens.push(makeToken(TokenType.Template, source.slice(start, pos), start, startLine, startCol));
+      consumeTemplate();
+      pushToken(TokenType.Template, start, startLine, startCol);
       continue;
     }
 
-    // Numbers
-    if (isDigit(ch) || (ch === "." && isDigit(source[pos + 1] ?? ""))) {
-      if (ch === "0" && (source[pos + 1] === "x" || source[pos + 1] === "X")) {
-        advance(); advance();
-        while (pos < source.length && isHexDigit(peek())) advance();
-      } else if (ch === "0" && (source[pos + 1] === "b" || source[pos + 1] === "B")) {
-        advance(); advance();
-        while (pos < source.length && (peek() === "0" || peek() === "1")) advance();
-      } else if (ch === "0" && (source[pos + 1] === "o" || source[pos + 1] === "O")) {
-        advance(); advance();
-        while (pos < source.length && isOctalDigit(peek())) advance();
-      } else {
-        while (pos < source.length && isDigit(peek())) advance();
-        if (peek() === ".") {
-          advance();
-          while (pos < source.length && isDigit(peek())) advance();
-        }
-        if (peek() === "e" || peek() === "E") {
-          advance();
-          if (peek() === "+" || peek() === "-") advance();
-          while (pos < source.length && isDigit(peek())) advance();
-        }
-      }
-      // BigInt suffix
-      if (peek() === "n") advance();
-      tokens.push(makeToken(TokenType.Number, source.slice(start, pos), start, startLine, startCol));
+    if (isDigit(ch) || (ch === "." && isDigit(peek(1)))) {
+      consumeNumber();
+      pushToken(TokenType.Number, start, startLine, startCol);
       continue;
     }
 
-    // Identifiers & keywords
-    if (isIdentStart(ch)) {
-      while (pos < source.length && isIdentPart(peek())) advance();
+    if (isIdentStart(peekCodePoint()) || isIdentifierEscape()) {
+      consumeIdentifier();
       const value = source.slice(start, pos);
-      const type = KEYWORDS.has(value) ? TokenType.Keyword : TokenType.Identifier;
-      tokens.push(makeToken(type, value, start, startLine, startCol));
+      pushToken(KEYWORDS.has(value) ? TokenType.Keyword : TokenType.Identifier, start, startLine, startCol);
       continue;
     }
 
-    // Regex literal (heuristic: / after certain tokens is division, otherwise regex)
-    if (ch === "/" && canBeRegex(tokens)) {
-      advance(); // opening /
-      while (pos < source.length && peek() !== "/") {
-        if (peek() === "\\") { advance(); advance(); continue; }
-        if (peek() === "[") {
-          advance();
-          while (pos < source.length && peek() !== "]") {
-            if (peek() === "\\") advance();
-            advance();
-          }
-        }
-        advance();
-      }
-      advance(); // closing /
-      // flags
-      while (pos < source.length && isIdentPart(peek())) advance();
-      tokens.push(makeToken(TokenType.RegExp, source.slice(start, pos), start, startLine, startCol));
+    if (ch === "/" && regexAllowed) {
+      consumeRegularExpression();
+      pushToken(TokenType.RegExp, start, startLine, startCol);
       continue;
     }
 
-    // Multi-character punctuators (sorted longest-first)
-    const remaining = source.slice(pos, pos + 4);
-    const punct = matchPunctuator(remaining);
+    const punct = matchPunctuator(source.slice(pos, pos + 4));
     if (punct) {
       for (let i = 0; i < punct.length; i++) advance();
-      tokens.push(makeToken(TokenType.Punctuator, punct, start, startLine, startCol));
+      pushToken(TokenType.Punctuator, start, startLine, startCol);
       continue;
     }
 
-    // Single-character fallback
     advance();
-    tokens.push(makeToken(TokenType.Punctuator, source.slice(start, pos), start, startLine, startCol));
+    pushToken(TokenType.Punctuator, start, startLine, startCol);
   }
 
   tokens.push(makeToken(TokenType.EOF, "", pos, line, column));
   return tokens;
+
+  function isIdentifierEscape(): boolean {
+    return peek() === "\\" && peek(1) === "u";
+  }
+}
+
+function isLineTerminator(ch: string): boolean {
+  return ch === "\n" || ch === "\r" || ch === "\u2028" || ch === "\u2029";
 }
 
 function isDigit(ch: string): boolean {
@@ -196,58 +445,23 @@ function isOctalDigit(ch: string): boolean {
 }
 
 function isIdentStart(ch: string): boolean {
-  return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch === "_" || ch === "$";
+  return ch !== "" && ID_START.test(ch);
 }
 
 function isIdentPart(ch: string): boolean {
-  return isIdentStart(ch) || isDigit(ch);
+  return ch !== "" && (ID_CONTINUE.test(ch) || isDigit(ch));
 }
 
 const MULTI_PUNCTUATORS = [
-  ">>>=", "===", "!==", ">>>", "<<=", ">>=", "**=", "&&=", "||=", "\?\?=",
+  ">>>=", "===", "!==", ">>>", "<<=", ">>=", "**=", "&&=", "||=", "??=",
   "&&", "||", "??", "==", "!=", "<=", ">=", "<<", ">>", "**",
   "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "=>",
   "++", "--", "?.", "...",
 ];
 
-function matchPunctuator(s: string): string | null {
-  for (const p of MULTI_PUNCTUATORS) {
-    if (s.startsWith(p)) return p;
-  }
-  return null;
-}
-
-/**
- * Keywords that produce a value (and thus / after them is division, not regex).
- * `this`, `true`, `false`, `null` evaluate to values — / after them is division.
- * Other keywords like `return`, `typeof`, `void`, `new`, `delete`, `throw`, `case`,
- * `in`, `instanceof` can precede regex.
- */
-const VALUE_KEYWORDS = new Set(["this", "true", "false", "null"]);
-
-function canBeRegex(tokens: Token[]): boolean {
-  // After these tokens, / is division, not regex
-  const lastSignificant = findLastSignificant(tokens);
-  if (!lastSignificant) return true;
-  if (lastSignificant.type === TokenType.Identifier) return false;
-  if (lastSignificant.type === TokenType.Number) return false;
-  if (lastSignificant.type === TokenType.String) return false;
-  if (lastSignificant.type === TokenType.Punctuator) {
-    return !["]", ")", "++", "--"].includes(lastSignificant.value);
-  }
-  if (lastSignificant.type === TokenType.Keyword) {
-    // Value-producing keywords: / after them is division
-    return !VALUE_KEYWORDS.has(lastSignificant.value);
-  }
-  return true;
-}
-
-function findLastSignificant(tokens: Token[]): Token | null {
-  for (let i = tokens.length - 1; i >= 0; i--) {
-    const t = tokens[i];
-    if (t.type !== TokenType.Whitespace && t.type !== TokenType.LineTerminator && t.type !== TokenType.LineComment && t.type !== TokenType.BlockComment) {
-      return t;
-    }
+function matchPunctuator(source: string): string | null {
+  for (const punctuator of MULTI_PUNCTUATORS) {
+    if (source.startsWith(punctuator)) return punctuator;
   }
   return null;
 }

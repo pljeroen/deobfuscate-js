@@ -121,7 +121,7 @@ describe("format pass", () => {
     });
 
     it("adds space between case and value", () => {
-      expect(fmt("case 1:return x")).toBe("case 1: return x\n");
+      expect(fmt("switch(n){case 1:return x}")).toBe("switch (n) {\n  case 1: return x\n}\n");
     });
   });
 
@@ -143,7 +143,20 @@ describe("format pass", () => {
     });
 
     it("distinguishes ternary colon from case label colon", () => {
-      expect(fmt("case 1:return x")).toBe("case 1: return x\n");
+      expect(fmt("switch(n){case 1:return x;case 2:return a?b:c}")).toBe(
+        "switch (n) {\n  case 1: return x;\n  case 2: return a ? b : c\n}\n"
+      );
+    });
+  });
+
+  describe("text that is not a program", () => {
+    it("leaves a case clause fragment unformatted and reports why", () => {
+      expect(fmt("case 1:return x")).toBe("case 1:return x");
+      const withResult = formatPass as unknown as { runWithResult?: (input: string) => { text: string; fallbackReason?: string } };
+      expect(typeof withResult.runWithResult).toBe("function");
+      const result = withResult.runWithResult!("case 1:return x");
+      expect(result.text).toBe("case 1:return x");
+      expect(result.fallbackReason).toBe("the input does not parse as a program without errors");
     });
   });
 
