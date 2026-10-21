@@ -5,8 +5,7 @@
  * For a shape the pass must format, the output is the same program as the
  * input (tests/format-same-reference.ts), runs to the same result in a fresh
  * node:vm context, and the pass reports no fallback through its result member
- * formatPass.runWithResult(input) -> { text, fallbackReason? }
- * (TESTS_CANONICAL interface_pins IP-01, IP-02). For a raw-text-only shape the
+ * formatPass.runWithResult(input) -> { text, fallbackReason? }. For a raw-text-only shape the
  * pass returns its input unchanged and reports why. Control cases keep the
  * output the pass produced before this change, byte for byte.
  */

@@ -229,7 +229,7 @@ export const RECOVERED_ERROR_INPUTS: readonly string[] = [
   "function f(a, a) { 'use strict'; return a; }\nout.push(f(1, 2));\n",
 ];
 
-/** The shape of the format module's interface that the tests pin (see TESTS_CANONICAL interface_pins). */
+/** Public result and checking interface exposed by the format module and exercised by the tests. */
 export interface PinnedFormatResult {
   text: string;
   fallbackReason?: string;

@@ -2,7 +2,7 @@
  * The format pass's program-equality check, unit-tested on its own
  * (FORMAT-01 R-FM-01 AC-01.1 / AC-01.2, R-FM-16 AC-16.1 / AC-16.2).
  *
- * Pinned interface (TESTS_CANONICAL interface_pins IP-03, IP-04):
+ * Public checker interface exercised by these tests:
  *   src/passes/format.ts exports
  *     checkSameProgram(input, output): { same: true } | { same: false; reason: string }
  *     FORMAT_FALLBACK_REASONS: { notSameProgram, inputNotProgram } (the two reason texts)

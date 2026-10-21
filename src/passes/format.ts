@@ -3,6 +3,8 @@
  * properly indented output. Works at the token level, no AST needed.
  */
 
+import { Buffer } from "node:buffer";
+
 import type { ParserOptions } from "@babel/parser";
 
 import { parse as babelParse } from "../babel.js";
@@ -51,10 +53,21 @@ type SameProgramVerdict =
 
 type ParseGoal = "script" | "module";
 
-interface StrictParse {
-  program: string;
-  comments: string;
-  tokens: string;
+interface StrictParseFile {
+  program: unknown;
+  comments?: unknown[];
+  tokens?: unknown[];
+  errors?: unknown[];
+}
+
+interface StructuralSignature {
+  chunks: readonly Buffer[];
+  byteLength: number;
+}
+
+interface SignatureSink {
+  writeByte(value: number): void;
+  writeBytes(value: Buffer): void;
 }
 
 const PARSE_GOALS: readonly ParseGoal[] = ["script", "module"];
@@ -68,21 +81,220 @@ const STRICT_PARSE_OPTIONS: ParserOptions = {
 };
 const IGNORED_NODE_KEYS = new Set(["start", "end", "loc", "range", "leadingComments", "trailingComments", "innerComments"]);
 const IGNORED_EXTRA_KEYS = new Set(["parenStart", "trailingComma", "trailingCommaLoc"]);
+const SIGNATURE_CHUNK_BYTES = 64 * 1024;
 
-function canonical(value: unknown, inExtra: boolean): unknown {
-  if (typeof value === "bigint") return { $bigint: value.toString() };
-  if (typeof value === "number" && !Number.isFinite(value)) return { $number: String(value) };
-  if (Array.isArray(value)) return value.map((item) => canonical(item, false));
-  if (value !== null && typeof value === "object") {
-    const source = value as Record<string, unknown>;
-    const copy: Record<string, unknown> = {};
-    for (const key of Object.keys(source).sort()) {
-      if (IGNORED_NODE_KEYS.has(key) || (inExtra && IGNORED_EXTRA_KEYS.has(key))) continue;
-      copy[key] = canonical(source[key], key === "extra");
-    }
-    return copy;
+const enum ValueTag {
+  Null = 0,
+  Undefined = 1,
+  False = 2,
+  True = 3,
+  Number = 4,
+  NonFiniteNumber = 5,
+  BigInt = 6,
+  String = 7,
+  Array = 8,
+  Object = 9,
+}
+
+const enum StringTag {
+  New = 10,
+  Reference = 11,
+}
+
+const enum SignatureSection {
+  Program = 12,
+  Comments = 13,
+  Tokens = 14,
+  End = 15,
+}
+
+class SignatureWriter implements SignatureSink {
+  private readonly chunks: Buffer[] = [];
+  private chunk = Buffer.allocUnsafe(SIGNATURE_CHUNK_BYTES);
+  private offset = 0;
+  private total = 0;
+
+  writeByte(value: number): void {
+    if (this.offset === this.chunk.length) this.flushFullChunk();
+    this.chunk[this.offset++] = value;
+    this.total++;
   }
-  return value;
+
+  writeBytes(value: Buffer): void {
+    let sourceOffset = 0;
+    while (sourceOffset < value.length) {
+      if (this.offset === this.chunk.length) this.flushFullChunk();
+      const count = Math.min(value.length - sourceOffset, this.chunk.length - this.offset);
+      value.copy(this.chunk, this.offset, sourceOffset, sourceOffset + count);
+      sourceOffset += count;
+      this.offset += count;
+      this.total += count;
+    }
+  }
+
+  finish(): StructuralSignature {
+    if (this.offset > 0) this.chunks.push(this.chunk.subarray(0, this.offset));
+    return { chunks: this.chunks, byteLength: this.total };
+  }
+
+  private flushFullChunk(): void {
+    this.chunks.push(this.chunk);
+    this.chunk = Buffer.allocUnsafe(SIGNATURE_CHUNK_BYTES);
+    this.offset = 0;
+  }
+}
+
+class SignatureComparator implements SignatureSink {
+  private chunkIndex = 0;
+  private chunkOffset = 0;
+  private consumed = 0;
+  private equal = true;
+
+  constructor(private readonly expected: StructuralSignature) {}
+
+  writeByte(value: number): void {
+    if (!this.equal) return;
+    const chunk = this.expected.chunks[this.chunkIndex];
+    if (chunk === undefined || chunk[this.chunkOffset] !== value) {
+      this.equal = false;
+      return;
+    }
+    this.advance(1);
+  }
+
+  writeBytes(value: Buffer): void {
+    if (!this.equal) return;
+    let sourceOffset = 0;
+    while (sourceOffset < value.length) {
+      const chunk = this.expected.chunks[this.chunkIndex];
+      if (chunk === undefined) {
+        this.equal = false;
+        return;
+      }
+      const count = Math.min(value.length - sourceOffset, chunk.length - this.chunkOffset);
+      if (!value.subarray(sourceOffset, sourceOffset + count).equals(chunk.subarray(this.chunkOffset, this.chunkOffset + count))) {
+        this.equal = false;
+        return;
+      }
+      sourceOffset += count;
+      this.advance(count);
+    }
+  }
+
+  finish(): boolean {
+    return this.equal && this.consumed === this.expected.byteLength;
+  }
+
+  private advance(count: number): void {
+    this.chunkOffset += count;
+    this.consumed += count;
+    const chunk = this.expected.chunks[this.chunkIndex];
+    if (chunk !== undefined && this.chunkOffset === chunk.length) {
+      this.chunkIndex++;
+      this.chunkOffset = 0;
+    }
+  }
+}
+
+function writeVarUint(sink: SignatureSink, value: number): void {
+  let remaining = value;
+  do {
+    const byte = remaining % 128;
+    remaining = Math.floor(remaining / 128);
+    sink.writeByte(byte + (remaining > 0 ? 128 : 0));
+  } while (remaining > 0);
+}
+
+type CanonicalFrame =
+  | { kind: "value"; value: unknown; inExtra: boolean }
+  | { kind: "array"; value: unknown[]; index: number }
+  | { kind: "object"; value: Record<string, unknown>; keys: string[]; index: number };
+
+class CanonicalEncoder {
+  private readonly strings = new Map<string, number>();
+  private readonly numberBytes = Buffer.allocUnsafe(8);
+
+  constructor(private readonly sink: SignatureSink) {}
+
+  writeString(value: string): void {
+    const existing = this.strings.get(value);
+    if (existing !== undefined) {
+      this.sink.writeByte(StringTag.Reference);
+      writeVarUint(this.sink, existing);
+      return;
+    }
+
+    const id = this.strings.size;
+    this.strings.set(value, id);
+    const bytes = Buffer.from(value, "utf16le");
+    this.sink.writeByte(StringTag.New);
+    writeVarUint(this.sink, value.length);
+    this.sink.writeBytes(bytes);
+  }
+
+  writeValue(value: unknown, inExtra: boolean): void {
+    const stack: CanonicalFrame[] = [{ kind: "value", value, inExtra }];
+    while (stack.length > 0) {
+      const frame = stack.pop()!;
+      if (frame.kind === "array") {
+        if (frame.index < frame.value.length) {
+          const index = frame.index;
+          frame.index++;
+          stack.push(frame, { kind: "value", value: frame.value[index], inExtra: false });
+        }
+        continue;
+      }
+      if (frame.kind === "object") {
+        if (frame.index < frame.keys.length) {
+          const key = frame.keys[frame.index];
+          frame.index++;
+          this.writeString(key);
+          stack.push(frame, { kind: "value", value: frame.value[key], inExtra: key === "extra" });
+        }
+        continue;
+      }
+
+      const current = frame.value;
+      if (current === null) {
+        this.sink.writeByte(ValueTag.Null);
+      } else if (current === undefined) {
+        this.sink.writeByte(ValueTag.Undefined);
+      } else if (current === false) {
+        this.sink.writeByte(ValueTag.False);
+      } else if (current === true) {
+        this.sink.writeByte(ValueTag.True);
+      } else if (typeof current === "number") {
+        if (Number.isFinite(current)) {
+          this.sink.writeByte(ValueTag.Number);
+          this.numberBytes.writeDoubleBE(current);
+          this.sink.writeBytes(this.numberBytes);
+        } else {
+          this.sink.writeByte(ValueTag.NonFiniteNumber);
+          this.writeString(String(current));
+        }
+      } else if (typeof current === "bigint") {
+        this.sink.writeByte(ValueTag.BigInt);
+        this.writeString(current.toString());
+      } else if (typeof current === "string") {
+        this.sink.writeByte(ValueTag.String);
+        this.writeString(current);
+      } else if (Array.isArray(current)) {
+        this.sink.writeByte(ValueTag.Array);
+        writeVarUint(this.sink, current.length);
+        stack.push({ kind: "array", value: current, index: 0 });
+      } else if (typeof current === "object") {
+        const source = current as Record<string, unknown>;
+        const keys = Object.keys(source)
+          .filter((key) => !IGNORED_NODE_KEYS.has(key) && !(frame.inExtra && IGNORED_EXTRA_KEYS.has(key)))
+          .sort();
+        this.sink.writeByte(ValueTag.Object);
+        writeVarUint(this.sink, keys.length);
+        stack.push({ kind: "object", value: source, keys, index: 0 });
+      } else {
+        throw new TypeError(`Unsupported parser value type: ${typeof current}`);
+      }
+    }
+  }
 }
 
 function tokenKind(token: { type: unknown }): string {
@@ -90,13 +302,8 @@ function tokenKind(token: { type: unknown }): string {
   return typeof type === "string" ? type : String(type.label);
 }
 
-function parseStrict(text: string, sourceType: ParseGoal): StrictParse | undefined {
-  let file: {
-    program: unknown;
-    comments?: unknown[];
-    tokens?: unknown[];
-    errors?: unknown[];
-  };
+function parseStrict(text: string, sourceType: ParseGoal): StrictParseFile | undefined {
+  let file: StrictParseFile;
   try {
     file = babelParse(text, { ...STRICT_PARSE_OPTIONS, sourceType }) as unknown as typeof file;
   } catch (thrown: unknown) {
@@ -105,33 +312,62 @@ function parseStrict(text: string, sourceType: ParseGoal): StrictParse | undefin
   }
   if ((file.errors ?? []).length > 0) return undefined;
 
-  const comments = (file.comments ?? []).map((value) => {
+  return file;
+}
+
+function writeStrictParse(sink: SignatureSink, file: StrictParseFile): void {
+  const encoder = new CanonicalEncoder(sink);
+  sink.writeByte(SignatureSection.Program);
+  encoder.writeValue(file.program, false);
+
+  const comments = file.comments ?? [];
+  sink.writeByte(SignatureSection.Comments);
+  writeVarUint(sink, comments.length);
+  for (const value of comments) {
     const comment = value as { type: string; value: string };
-    return [comment.type, comment.value];
-  });
-  const tokens = (file.tokens ?? []).map((value) => {
+    encoder.writeString(comment.type);
+    encoder.writeString(comment.value);
+  }
+
+  const tokens = file.tokens ?? [];
+  sink.writeByte(SignatureSection.Tokens);
+  writeVarUint(sink, tokens.length);
+  for (const value of tokens) {
     const token = value as { type: unknown; value?: unknown };
-    return [tokenKind(token), canonical(token.value ?? null, false)];
-  });
-  return {
-    program: JSON.stringify(canonical(file.program, false)),
-    comments: JSON.stringify(comments),
-    tokens: JSON.stringify(tokens),
-  };
+    encoder.writeString(tokenKind(token));
+    encoder.writeValue(token.value ?? null, false);
+  }
+  sink.writeByte(SignatureSection.End);
+}
+
+function strictSignature(text: string, sourceType: ParseGoal): StructuralSignature | undefined {
+  const file = parseStrict(text, sourceType);
+  if (file === undefined) return undefined;
+  const writer = new SignatureWriter();
+  writeStrictParse(writer, file);
+  return writer.finish();
+}
+
+function matchesStrictSignature(text: string, sourceType: ParseGoal, expected: StructuralSignature): boolean {
+  const file = parseStrict(text, sourceType);
+  if (file === undefined) return false;
+  const comparator = new SignatureComparator(expected);
+  writeStrictParse(comparator, file);
+  return comparator.finish();
 }
 
 /** Decide whether output is exactly the same program as input under every input parse goal. */
 export function checkSameProgram(input: string, output: string): SameProgramVerdict {
-  const parsedInputs = PARSE_GOALS.map((goal) => [goal, parseStrict(input, goal)] as const)
-    .filter((entry): entry is readonly [ParseGoal, StrictParse] => entry[1] !== undefined);
-  if (parsedInputs.length === 0) return { same: false, reason: FORMAT_FALLBACK_REASONS.inputNotProgram };
-
-  for (const [goal, parsedInput] of parsedInputs) {
-    const parsedOutput = parseStrict(output, goal);
-    if (parsedOutput === undefined || parsedOutput.program !== parsedInput.program || parsedOutput.comments !== parsedInput.comments || parsedOutput.tokens !== parsedInput.tokens) {
+  let acceptedInputGoal = false;
+  for (const goal of PARSE_GOALS) {
+    const signature = strictSignature(input, goal);
+    if (signature === undefined) continue;
+    acceptedInputGoal = true;
+    if (!matchesStrictSignature(output, goal, signature)) {
       return { same: false, reason: FORMAT_FALLBACK_REASONS.notSameProgram };
     }
   }
+  if (!acceptedInputGoal) return { same: false, reason: FORMAT_FALLBACK_REASONS.inputNotProgram };
   return { same: true };
 }
 
@@ -183,8 +419,14 @@ type FormatPass = TokenPass & {
   runWithResult(input: string): TokenPassResult;
 };
 
+function checkedFormat(input: string): TokenPassResult {
+  const candidate = formatPass.layout(input);
+  const verdict = checkSameProgram(input, candidate);
+  return verdict.same ? { text: candidate } : { text: input, fallbackReason: verdict.reason };
+}
+
 function runFormat(input: string): string {
-  return formatPass.runWithResult(input).text;
+  return checkedFormat(input).text;
 }
 
 export const formatPass: FormatPass = {
@@ -198,9 +440,7 @@ export const formatPass: FormatPass = {
     // as the pipeline's pass-failure contract permits for every token pass.
     if (formatPass.run !== runFormat) return { text: formatPass.run(input) };
 
-    const candidate = formatPass.layout(input);
-    const verdict = checkSameProgram(input, candidate);
-    return verdict.same ? { text: candidate } : { text: input, fallbackReason: verdict.reason };
+    return checkedFormat(input);
   },
 
   layout(input: string): string {
@@ -378,7 +618,14 @@ export const formatPass: FormatPass = {
 
           default: {
             // Space after keyword that needs it (return!, return-, return~)
-            if (prevTok && prevTok.type === TokenType.Keyword && KEYWORD_NEEDS_SPACE.has(prevTok.value)) {
+            const beforePrevTok = i > 1 ? significantTokens[i - 2] : undefined;
+            const keywordIsProperty = beforePrevTok?.type === TokenType.Punctuator &&
+              (beforePrevTok.value === "." || beforePrevTok.value === "?.");
+            const unarySign = (tok.value === "-" || tok.value === "+") && isUnarySign(prevTok);
+            const operatorProvidesLeadingSpace = ASSIGNMENT_OPS.has(tok.value) ||
+              (BINARY_OPS.has(tok.value) && !unarySign);
+            if (prevTok && prevTok.type === TokenType.Keyword && KEYWORD_NEEDS_SPACE.has(prevTok.value) &&
+                !(keywordIsProperty && operatorProvidesLeadingSpace)) {
               emitWordSep();
             }
 
@@ -388,7 +635,7 @@ export const formatPass: FormatPass = {
             }
 
             // Handle unary minus/plus: no spaces when unary
-            if ((tok.value === "-" || tok.value === "+") && isUnarySign(prevTok)) {
+            if (unarySign) {
               emitIndent();
               // Space was already emitted above if after keyword
               emit(tok.value);

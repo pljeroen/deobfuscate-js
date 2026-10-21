@@ -2,19 +2,19 @@
  * The format pass's fallback inside the pipeline (FORMAT-01 R-FM-01 AC-01.3,
  * R-FM-02 AC-02.1 / AC-02.2, R-FM-10 AC-10.2, R-FM-11 UX-FM-01).
  *
- * Pinned interface (TESTS_CANONICAL interface_pins):
- *   IP-01 src/types.ts: TokenPassResult { text: string; fallbackReason?: string };
+ * Public format-pass interface exercised by these tests:
+ *   src/types.ts: TokenPassResult { text: string; fallbackReason?: string };
  *         TokenPass gains the optional member runWithResult?(input): TokenPassResult;
  *         run(input): string is unchanged.
- *   IP-02 formatPass.runWithResult(x) returns { text, fallbackReason? };
+ *   formatPass.runWithResult(x) returns { text, fallbackReason? };
  *         formatPass.run(x) === formatPass.runWithResult(x).text.
- *   IP-05 formatPass.layout(x): the unchecked formatted text; runWithResult
+ *   formatPass.layout(x): the unchecked formatted text; runWithResult
  *         takes its candidate from formatPass.layout, looked up on the
  *         formatPass object at call time (a test double replaces it).
- *   IP-06 the check parses with parse from "@babel/parser" (imported directly
+ *   The check parses with parse from "@babel/parser" (imported directly
  *         or through src/babel.ts), error recovery off; only the SyntaxError
  *         that parse throws becomes a result value, any other error propagates.
- *   IP-07 runPipelineWithReport reads runWithResult when a token pass has it;
+ *   runPipelineWithReport reads runWithResult when a token pass has it;
  *         on a fallback it records "format: output left unformatted: <reason>"
  *         and the report entry { name: "format", changed: false }.
  *         runPipeline and runTokenPipeline call run and get the unformatted
