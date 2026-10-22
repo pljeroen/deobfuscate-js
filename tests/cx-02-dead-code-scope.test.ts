@@ -10,6 +10,7 @@ import { allASTPasses } from "../src/cli-shared.js";
 import { generate, parse } from "../src/parser.js";
 import { deadCodeEliminatePass } from "../src/passes/dead-code-eliminate.js";
 import { formatPass } from "../src/passes/format.js";
+import { astRenamePass } from "../src/passes/ast-rename.js";
 import { filterSafePasses, runPipelineWithReport } from "../src/pipeline.js";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -41,6 +42,10 @@ function executeFresh(source: string, observedGlobals: string[]): Execution {
 
 function directCode(source: string): string {
   return generate(deadCodeEliminatePass.run(parse(source), source));
+}
+
+function astRenameCode(source: string): string {
+  return generate(astRenamePass.run(parse(source), source));
 }
 
 function defaultPipeline(source: string): { code: string; warnings: string[] } {
@@ -97,6 +102,112 @@ function selectedNestedBlockFunctionDeclarationCount(code: string): number {
     ? selected.body.filter((statement) => t.isFunctionDeclaration(statement)).length
     : 0;
 }
+
+function directVariableNames(code: string): string[] {
+  return outerFunctionBody(code).body.flatMap((statement) => {
+    if (!t.isVariableDeclaration(statement)) return [];
+    return statement.declarations.flatMap((declaration) =>
+      t.isIdentifier(declaration.id) ? [declaration.id.name] : [],
+    );
+  });
+}
+
+type SelectedArm = "truthy" | "falsy";
+
+function selectedFunctionBlock(arm: SelectedArm, sentinel: number): string {
+  const declaration = `function _0xf() { return ${sentinel}; }`;
+  return arm === "truthy"
+    ? `if (true) { ${declaration} }`
+    : `if (false) { globalThis.dead = ${sentinel}; } else { ${declaration} }`;
+}
+
+const resolutionLinkedBindings = [
+  {
+    id: "BR1",
+    relationship: "same-function FunctionExpression self-name",
+    cliRepresentative: true,
+    source(arm: SelectedArm, sentinel: number): string {
+      return `var invoke = function _0xf() { ${selectedFunctionBlock(arm, sentinel)} return _0xf(); }; globalThis.answer = invoke();`;
+    },
+  },
+  {
+    id: "BR2",
+    relationship: "ancestor var without initializer through FunctionDeclaration",
+    cliRepresentative: true,
+    source(arm: SelectedArm, sentinel: number): string {
+      return `function outer() { var _0xf; function inner() { ${selectedFunctionBlock(arm, sentinel)} return _0xf(); } return inner(); } globalThis.answer = outer();`;
+    },
+  },
+  {
+    id: "BR3",
+    relationship: "ancestor let without initializer through FunctionExpression",
+    cliRepresentative: false,
+    source(arm: SelectedArm, sentinel: number): string {
+      return `function outer() { let _0xf; var inner = function () { ${selectedFunctionBlock(arm, sentinel)} return _0xf(); }; return inner(); } globalThis.answer = outer();`;
+    },
+  },
+  {
+    id: "BR4",
+    relationship: "ancestor class through ArrowFunctionExpression",
+    cliRepresentative: true,
+    source(arm: SelectedArm, sentinel: number): string {
+      return `function outer() { class _0xf {} var inner = () => { ${selectedFunctionBlock(arm, sentinel)} return _0xf(); }; return inner(); } globalThis.answer = outer();`;
+    },
+  },
+  {
+    id: "BR5",
+    relationship: "ancestor parameter through ObjectMethod",
+    cliRepresentative: true,
+    source(arm: SelectedArm, sentinel: number): string {
+      return `function outer(_0xf) { var holder = { method() { ${selectedFunctionBlock(arm, sentinel)} return _0xf(); } }; return holder.method(); } globalThis.answer = outer(0);`;
+    },
+  },
+  {
+    id: "BR6",
+    relationship: "ancestor hoisted sibling through FunctionDeclaration",
+    cliRepresentative: false,
+    source(arm: SelectedArm, sentinel: number): string {
+      return `function outer() { function _0xf() { return 0; } function inner() { ${selectedFunctionBlock(arm, sentinel)} return _0xf(); } return inner(); } globalThis.answer = outer();`;
+    },
+  },
+  {
+    id: "BR7",
+    relationship: "inner FunctionDeclaration own name",
+    cliRepresentative: true,
+    source(arm: SelectedArm, sentinel: number): string {
+      return `function outer() { function _0xf(reentered) { if (reentered) return -1; ${selectedFunctionBlock(arm, sentinel)} return _0xf(1); } return _0xf(0); } globalThis.answer = outer();`;
+    },
+  },
+  {
+    id: "BR8",
+    relationship: "outer FunctionExpression name through FunctionExpression",
+    cliRepresentative: true,
+    source(arm: SelectedArm, sentinel: number): string {
+      return `var invoke = function _0xf(reentered) { if (reentered) return -1; var inner = function () { ${selectedFunctionBlock(arm, sentinel)} return _0xf(1); }; return inner(); }; globalThis.answer = invoke(0);`;
+    },
+  },
+  {
+    id: "BR9",
+    relationship: "two ancestor functions through FunctionDeclaration and ObjectMethod",
+    cliRepresentative: false,
+    source(arm: SelectedArm, sentinel: number): string {
+      return `function outer() { var _0xf; function middle() { var holder = { method() { ${selectedFunctionBlock(arm, sentinel)} return _0xf(); } }; return holder.method(); } return middle(); } globalThis.answer = outer();`;
+    },
+  },
+] as const;
+
+const resolutionLinkedCases = resolutionLinkedBindings.flatMap((binding, bindingIndex) =>
+  (["truthy", "falsy"] as const).map((arm, armIndex) => {
+    const sentinel = 101 + bindingIndex * 2 + armIndex;
+    return {
+      ...binding,
+      arm,
+      sentinel,
+      source: binding.source(arm, sentinel),
+      useCli: binding.cliRepresentative && arm === "truthy",
+    };
+  }),
+);
 
 function lines(text: string): string[] {
   const result = text.split("\n");
@@ -459,6 +570,70 @@ describe("CX-02 selected dead-code branch scope preservation", () => {
       pipelineWarnings: [],
     });
   }, 120_000);
+
+  it.each(resolutionLinkedCases)(
+    "preserves resolution-linked Annex B execution for $id $arm ($relationship)",
+    ({ source, sentinel, useCli }) => {
+      const direct = directCode(source);
+      const pipeline = defaultPipeline(source);
+      const cliResults = useCli
+        ? [false, true].map((unsafe) => ({ unsafe, result: runCli(source, unsafe) }))
+        : [];
+      const expected: Execution = { completion: "normal", globals: { answer: sentinel } };
+
+      for (const { unsafe, result } of cliResults) {
+        const warningsAndErrors = result.stderrLines.filter((line) => /^(WARNING|ERROR):/.test(line));
+        expect(result.signal).toBeNull();
+        expect(result.status, result.stderrLines.join("\n")).toBe(0);
+        expect(warningsAndErrors).toEqual(unsafe ? [UNSAFE_NOTICE] : []);
+        expect(result.stdoutLines.filter((line) => line.startsWith("Done: "))).toHaveLength(1);
+        expect(result.output).toBeDefined();
+      }
+
+      expect({
+        source: executeFresh(source, ["answer"]),
+        direct: executeFresh(direct, ["answer"]),
+        defaultPipeline: executeFresh(pipeline.code, ["answer"]),
+        defaultCli: cliResults[0]
+          ? executeFresh(cliResults[0].result.output ?? "", ["answer"])
+          : expected,
+        unsafeCli: cliResults[1]
+          ? executeFresh(cliResults[1].result.output ?? "", ["answer"])
+          : expected,
+        pipelineWarnings: pipeline.warnings,
+      }).toEqual({
+        source: expected,
+        direct: expected,
+        defaultPipeline: expected,
+        defaultCli: expected,
+        unsafeCli: expected,
+        pipelineWarnings: [],
+      });
+    },
+    120_000,
+  );
+
+  it("keeps Annex B protection resolution-linked and deterministic", () => {
+    const protectedWithSibling = astRenameCode(
+      "function outer() { var _0xf; var _0xa = 5; if (true) { function _0xf() { return 28; } } return _0xf() + _0xa; } globalThis.answer = outer();",
+    );
+    const mismatchedResolution = astRenameCode(
+      "function outer() { var _0xf = 1; function inner(_0xf) { if (true) { function _0xf() {} } return typeof _0xf; } return _0xf + inner(2); } globalThis.answer = outer();",
+    );
+    const strictDeclaration = astRenameCode(
+      "function outer() { 'use strict'; var _0xf; if (true) { function _0xf() {} } return typeof _0xf; } globalThis.answer = outer();",
+    );
+
+    expect({
+      protectedNames: directVariableNames(protectedWithSibling),
+      mismatchedNames: directVariableNames(mismatchedResolution),
+      strictNames: directVariableNames(strictDeclaration),
+    }).toEqual({
+      protectedNames: ["_0xf", "other"],
+      mismatchedNames: ["value"],
+      strictNames: ["value"],
+    });
+  });
 
   it("removes an unreferenced block function nested in a strict function", () => {
     const source = "function outer() { 'use strict'; if (true) { function f() { return 1; } } return typeof f; } globalThis.answer = outer();";

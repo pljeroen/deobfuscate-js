@@ -12,6 +12,23 @@ import { traverse } from "../babel.js";
 import type { File, FunctionDeclaration, Node } from "@babel/types";
 import type { ASTPass } from "../types.js";
 
+type ScopeBinding = {
+  kind: string;
+  scope: ScopeLike;
+};
+
+type ScopeLike = {
+  bindings: Record<string, ScopeBinding>;
+  getBinding(name: string): ScopeBinding | undefined;
+};
+
+type FunctionParentPath = {
+  node: {
+    body: Node;
+  };
+  scope: ScopeLike;
+};
+
 type FunctionDeclarationPath = {
   node: FunctionDeclaration;
   parentPath: {
@@ -19,7 +36,7 @@ type FunctionDeclarationPath = {
     isBlockStatement(): boolean;
     isSwitchCase(): boolean;
   };
-  getFunctionParent(): unknown;
+  getFunctionParent(): FunctionParentPath | null;
   isInStrictMode(): boolean;
 };
 
@@ -81,23 +98,30 @@ export const astRenamePass: ASTPass = {
         const scope = path.scope;
         let nameIdx = 0;
 
-        // Annex B links a sloppy block function to a same-name function-scope
-        // var/hoisted binding. Renaming only the outer binding breaks that link.
-        const annexBProtectedNames = new Set<string>();
+        // Annex B links a sloppy block function to the binding resolved from
+        // its enclosing function. Renaming only that binding breaks the link.
+        const annexBProtectedBindings = new Set<unknown>();
         path.traverse({
           FunctionDeclaration(declarationPath: FunctionDeclarationPath) {
             const { node, parentPath } = declarationPath;
             if (!node.id || node.async || node.generator || declarationPath.isInStrictMode()) return;
-            if (declarationPath.getFunctionParent() !== path) return;
+
+            const enclosingFunction = declarationPath.getFunctionParent();
+            if (!enclosingFunction) return;
 
             const belowAnnexBBoundary = parentPath.isSwitchCase()
-              || (parentPath.isBlockStatement() && parentPath.node !== path.node.body);
+              || (parentPath.isBlockStatement() && parentPath.node !== enclosingFunction.node.body);
             if (!belowAnnexBBoundary) return;
 
-            const outerBinding = scope.bindings[node.id.name];
-            if (outerBinding?.kind === "var" || outerBinding?.kind === "hoisted") {
-              annexBProtectedNames.add(node.id.name);
-            }
+            const resolvedBinding = enclosingFunction.scope.getBinding(node.id.name);
+            if (!resolvedBinding || scope.bindings[node.id.name] !== resolvedBinding) return;
+
+            const sameFunctionKindQualifies = resolvedBinding.kind === "var"
+              || resolvedBinding.kind === "hoisted"
+              || resolvedBinding.kind === "local";
+            if (resolvedBinding.scope === enclosingFunction.scope && !sameFunctionKindQualifies) return;
+
+            annexBProtectedBindings.add(resolvedBinding);
           },
         });
 
@@ -137,7 +161,7 @@ export const astRenamePass: ASTPass = {
             nameIdx++;
           } while (scope.hasBinding(newName) || GLOBALS.has(newName) || unboundNames.has(newName) || descendantNames.has(newName));
 
-          if (annexBProtectedNames.has(name)) continue;
+          if (annexBProtectedBindings.has(binding)) continue;
 
           // Use Babel's scope.rename for safe, correct renaming
           scope.rename(name, newName);
