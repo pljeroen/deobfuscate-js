@@ -240,7 +240,7 @@ function removeBindingDeclaration(binding: ReturnType<NodePath["scope"]["getBind
  *   while (true) { switch (state) { case N: ...; state = M; continue; } break; }
  *
  * Resolves execution order by tracing state transitions statically.
- * Only handles deterministic transitions (state = constant).
+ * Only handles unambiguous terminal-reaching traces with supported transitions.
  */
 function unflattenArithmeticDispatch(whilePath: NodePath<t.WhileStatement>): boolean {
   if (!isConstantTruthy(whilePath.node.test)) return false;
@@ -266,7 +266,8 @@ function unflattenArithmeticDispatch(whilePath: NodePath<t.WhileStatement>): boo
 
   // Build case map: numeric case label → { body statements, next state }
   const caseMap = new Map<number, { stmts: t.Statement[]; nextState: number | null }>();
-  let terminalState: number | null = null;
+  const modeledStateAssignments = new Set<t.AssignmentExpression>();
+  const terminalCases = new Set<t.SwitchCase>();
 
   for (const switchCase of switchStmt.cases) {
     if (!switchCase.test) return false; // no default case
@@ -285,6 +286,10 @@ function unflattenArithmeticDispatch(whilePath: NodePath<t.WhileStatement>): boo
       return false;
     }
 
+    // JavaScript selects the first matching case. A Map would otherwise silently
+    // replace it with a later duplicate and change the dispatch semantics.
+    if (caseMap.has(label)) return false;
+
     const consequent = switchCase.consequent;
     if (consequent.length === 0) return false;
 
@@ -292,18 +297,18 @@ function unflattenArithmeticDispatch(whilePath: NodePath<t.WhileStatement>): boo
 
     // Check for terminal case: ends with break (not continue)
     if (t.isBreakStatement(lastStmt) && !lastStmt.label) {
-      terminalState = label;
-      caseMap.set(label, { stmts: [], nextState: null });
+      terminalCases.add(switchCase);
+      caseMap.set(label, { stmts: consequent.slice(0, -1), nextState: null });
       continue;
     }
 
     // Must end with continue
     if (!t.isContinueStatement(lastStmt) || lastStmt.label) return false;
 
-    // Find the state assignment: state = constant
+    // Find exactly one supported top-level state assignment. Keep it in the
+    // emitted statements so observations of the state binding remain intact.
     const bodyWithoutContinue = consequent.slice(0, -1);
     let nextState: number | null = null;
-    const stmtsWithoutStateAssign: t.Statement[] = [];
 
     for (const stmt of bodyWithoutContinue) {
       if (
@@ -313,6 +318,8 @@ function unflattenArithmeticDispatch(whilePath: NodePath<t.WhileStatement>): boo
         t.isIdentifier(stmt.expression.left) &&
         stmt.expression.left.name === stateVarName
       ) {
+        if (nextState !== null) return false;
+
         // state = constant
         if (t.isNumericLiteral(stmt.expression.right)) {
           nextState = stmt.expression.right.value;
@@ -332,31 +339,59 @@ function unflattenArithmeticDispatch(whilePath: NodePath<t.WhileStatement>): boo
             return false;
           }
         }
-      } else {
-        stmtsWithoutStateAssign.push(stmt);
+        modeledStateAssignments.add(stmt.expression);
       }
     }
 
     if (nextState === null) return false; // No state transition found
-    caseMap.set(label, { stmts: stmtsWithoutStateAssign, nextState });
+    caseMap.set(label, { stmts: bodyWithoutContinue, nextState });
   }
 
-  // Trace execution order starting from initial state
+  // Reject every write to the dispatcher binding except a modeled transition or
+  // a write inside a validated terminal case. This includes updates, compound or
+  // destructuring assignments, nested writes, and writes before loop entry.
+  // Terminal-case writes are safe because their statements are retained and the
+  // trace exits immediately after that case.
+  const hasUnmodeledStateWrite = stateBinding.constantViolations.some((violation: NodePath) => {
+    if (violation.isAssignmentExpression() && modeledStateAssignments.has(violation.node)) {
+      return false;
+    }
+
+    let current: NodePath | null = violation;
+    while (current !== null) {
+      if (current.isSwitchCase() && terminalCases.has(current.node)) {
+        return false;
+      }
+      current = current.parentPath;
+    }
+    return true;
+  });
+  if (hasUnmodeledStateWrite) return false;
+
+  // Trace execution order starting from initial state. A repeat, missing case,
+  // or exhausted bound is a refusal, never permission to emit a finite prefix.
   const order: number[] = [];
   const visited = new Set<number>();
-  let currentState: number | null = initialState;
+  let currentState = initialState;
+  let reachedTerminal = false;
   const MAX_TRACE = 1000;
 
-  while (currentState !== null && !visited.has(currentState) && order.length < MAX_TRACE) {
+  while (order.length < MAX_TRACE) {
+    if (visited.has(currentState)) return false;
+
     visited.add(currentState);
     const entry = caseMap.get(currentState);
     if (!entry) return false; // Missing case
 
     order.push(currentState);
+    if (entry.nextState === null) {
+      reachedTerminal = true;
+      break;
+    }
     currentState = entry.nextState;
   }
 
-  if (order.length === 0) return false;
+  if (!reachedTerminal) return false;
 
   // Build ordered statement list
   const orderedStatements: t.Statement[] = [];
@@ -369,9 +404,6 @@ function unflattenArithmeticDispatch(whilePath: NodePath<t.WhileStatement>): boo
 
   // Replace while loop with ordered statements
   whilePath.replaceWithMultiple(orderedStatements);
-
-  // Remove state variable declaration
-  removeBindingDeclaration(stateBinding);
 
   return true;
 }

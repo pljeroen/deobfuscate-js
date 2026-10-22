@@ -178,7 +178,7 @@ b();
 c();
 ```
 
-Resolves the order array (pipe-delimited string or array literal), maps case labels to statement bodies, emits in resolved order, and removes dispatcher variables. Also handles arithmetic state-machine dispatchers with constant (`state = N`), additive (`state = state + C`), affine (`state = state * K + C`), and XOR (`state = state ^ C`) transitions. Capped at 25 iterations with 1000-state trace limit.
+Resolves the order array (pipe-delimited string or array literal), maps case labels to statement bodies, emits in resolved order, and removes dispatcher variables. Also handles arithmetic state-machine dispatchers with constant (`state = N`), additive (`state = state + C`), affine (`state = state * K + C`), and XOR (`state = state ^ C`) transitions when the trace is unambiguous and reaches a terminal within 1000 states; cyclic, ambiguous, missing-state, and over-limit shapes remain unchanged. Capped at 25 iterations.
 
 #### Anti-Debug Removal
 
