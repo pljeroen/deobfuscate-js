@@ -26,8 +26,8 @@ export const deadCodeEliminatePass: ASTPass = {
         if (testResult.value) {
           // if(true) { A } else { B } -> A
           if (t.isBlockStatement(path.node.consequent)) {
-            // If the block contains let/const, keep the block to preserve scoping
-            if (hasBlockScopedDecl(path.node.consequent)) {
+            // Keep scope-sensitive declarations inside their original block
+            if (hasScopeSensitiveDeclaration(path.node.consequent)) {
               path.replaceWith(path.node.consequent);
             } else {
               path.replaceWithMultiple(path.node.consequent.body);
@@ -39,7 +39,7 @@ export const deadCodeEliminatePass: ASTPass = {
           // if(false) { A } else { B } -> B (or remove entirely)
           if (path.node.alternate) {
             if (t.isBlockStatement(path.node.alternate)) {
-              if (hasBlockScopedDecl(path.node.alternate)) {
+              if (hasScopeSensitiveDeclaration(path.node.alternate)) {
                 path.replaceWith(path.node.alternate);
               } else {
                 path.replaceWithMultiple(path.node.alternate.body);
@@ -167,10 +167,13 @@ export const deadCodeEliminatePass: ASTPass = {
   },
 };
 
-/** Check if a block statement contains let/const declarations (block-scoped) */
-function hasBlockScopedDecl(block: t.BlockStatement): boolean {
+/** Check whether removing a block would leak a direct declaration into its parent scope. */
+function hasScopeSensitiveDeclaration(block: t.BlockStatement): boolean {
   return block.body.some(
-    stmt => t.isVariableDeclaration(stmt) && (stmt.kind === "let" || stmt.kind === "const"),
+    stmt =>
+      (t.isVariableDeclaration(stmt) && stmt.kind !== "var") ||
+      t.isClassDeclaration(stmt) ||
+      t.isFunctionDeclaration(stmt),
   );
 }
 
