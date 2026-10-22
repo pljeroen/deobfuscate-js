@@ -91,6 +91,13 @@ function directFunctionBodyDeclarationCount(code: string): number {
   return outerFunctionBody(code).body.filter((statement) => t.isFunctionDeclaration(statement)).length;
 }
 
+function selectedNestedBlockFunctionDeclarationCount(code: string): number {
+  const selected = outerFunctionBody(code).body.find((statement) => t.isBlockStatement(statement));
+  return t.isBlockStatement(selected)
+    ? selected.body.filter((statement) => t.isFunctionDeclaration(statement)).length
+    : 0;
+}
+
 function lines(text: string): string[] {
   const result = text.split("\n");
   if (result.at(-1) === "") result.pop();
@@ -397,6 +404,75 @@ describe("CX-02 selected dead-code branch scope preservation", () => {
       globals: { answer },
     });
   }, 120_000);
+
+  const annexBCollisionCases = [
+    {
+      id: "R1 truthy var-before",
+      source: "function outer() { var _0xf; if (true) { function _0xf() { return 1; } } return _0xf(); } globalThis.answer = outer();",
+      baseAnswer: 1,
+    },
+    {
+      id: "R2 falsy alternate",
+      source: "function outer() { var _0xg; if (false) { globalThis.dead = 1; } else { function _0xg() { return 2; } } return _0xg(); } globalThis.answer = outer();",
+      baseAnswer: 2,
+    },
+    {
+      id: "R4 var-after",
+      source: "function outer() { if (true) { function _0xf() { return 4; } } var _0xf; return _0xf(); } globalThis.answer = outer();",
+      baseAnswer: 4,
+    },
+    {
+      id: "R5 function-body duplicate",
+      source: "function outer() { function _0xf() { return 0; } if (true) { function _0xf() { return 5; } } return _0xf(); } globalThis.answer = outer();",
+      baseAnswer: 5,
+    },
+  ] as const;
+
+  it.each(annexBCollisionCases)("preserves the source and immutable Base answer for $id at every production layer", ({ source, baseAnswer }) => {
+    const direct = directCode(source);
+    const pipeline = defaultPipeline(source);
+    const cliResults = [false, true].map((unsafe) => ({ unsafe, result: runCli(source, unsafe) }));
+    const expected: Execution = { completion: "normal", globals: { answer: baseAnswer } };
+
+    for (const { unsafe, result } of cliResults) {
+      const warningsAndErrors = result.stderrLines.filter((line) => /^(WARNING|ERROR):/.test(line));
+      expect(result.signal).toBeNull();
+      expect(result.status, result.stderrLines.join("\n")).toBe(0);
+      expect(warningsAndErrors).toEqual(unsafe ? [UNSAFE_NOTICE] : []);
+      expect(result.stdoutLines.filter((line) => line.startsWith("Done: "))).toHaveLength(1);
+      expect(result.output).toBeDefined();
+    }
+
+    expect({
+      source: executeFresh(source, ["answer"]),
+      direct: executeFresh(direct, ["answer"]),
+      defaultPipeline: executeFresh(pipeline.code, ["answer"]),
+      defaultCli: executeFresh(cliResults[0].result.output ?? "", ["answer"]),
+      unsafeCli: executeFresh(cliResults[1].result.output ?? "", ["answer"]),
+      pipelineWarnings: pipeline.warnings,
+    }).toEqual({
+      source: expected,
+      direct: expected,
+      defaultPipeline: expected,
+      defaultCli: expected,
+      unsafeCli: expected,
+      pipelineWarnings: [],
+    });
+  }, 120_000);
+
+  it("removes an unreferenced block function nested in a strict function", () => {
+    const source = "function outer() { 'use strict'; if (true) { function f() { return 1; } } return typeof f; } globalThis.answer = outer();";
+    const direct = directCode(source);
+    const pipeline = defaultPipeline(source);
+    const expected: Execution = { completion: "normal", globals: { answer: "undefined" } };
+
+    expect(executeFresh(source, ["answer"])).toEqual(expected);
+    expect(executeFresh(direct, ["answer"])).toEqual(expected);
+    expect(executeFresh(pipeline.code, ["answer"])).toEqual(expected);
+    expect(pipeline.warnings).toEqual([]);
+    expect(selectedNestedBlockFunctionDeclarationCount(direct)).toBe(0);
+    expect(selectedNestedBlockFunctionDeclarationCount(pipeline.code)).toBe(0);
+  });
 
   it("still removes an ordinary unreferenced function declaration directly in a function body", () => {
     const source = "function outer() { function unused() { return 1; } return 2; } globalThis.answer = outer();";

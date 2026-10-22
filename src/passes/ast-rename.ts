@@ -9,8 +9,19 @@
  */
 
 import { traverse } from "../babel.js";
-import type { File } from "@babel/types";
+import type { File, FunctionDeclaration, Node } from "@babel/types";
 import type { ASTPass } from "../types.js";
+
+type FunctionDeclarationPath = {
+  node: FunctionDeclaration;
+  parentPath: {
+    node: Node;
+    isBlockStatement(): boolean;
+    isSwitchCase(): boolean;
+  };
+  getFunctionParent(): unknown;
+  isInStrictMode(): boolean;
+};
 
 // Names that are conventional and should not be renamed
 const KEEP_NAMES = new Set(["i", "j", "k", "x", "y", "z", "_", "$"]);
@@ -70,6 +81,26 @@ export const astRenamePass: ASTPass = {
         const scope = path.scope;
         let nameIdx = 0;
 
+        // Annex B links a sloppy block function to a same-name function-scope
+        // var/hoisted binding. Renaming only the outer binding breaks that link.
+        const annexBProtectedNames = new Set<string>();
+        path.traverse({
+          FunctionDeclaration(declarationPath: FunctionDeclarationPath) {
+            const { node, parentPath } = declarationPath;
+            if (!node.id || node.async || node.generator || declarationPath.isInStrictMode()) return;
+            if (declarationPath.getFunctionParent() !== path) return;
+
+            const belowAnnexBBoundary = parentPath.isSwitchCase()
+              || (parentPath.isBlockStatement() && parentPath.node !== path.node.body);
+            if (!belowAnnexBBoundary) return;
+
+            const outerBinding = scope.bindings[node.id.name];
+            if (outerBinding?.kind === "var" || outerBinding?.kind === "hoisted") {
+              annexBProtectedNames.add(node.id.name);
+            }
+          },
+        });
+
         // Collect unbound references in this scope to avoid collisions
         const unboundNames = new Set<string>();
         path.traverse({
@@ -105,6 +136,8 @@ export const astRenamePass: ASTPass = {
               : `var${nameIdx - DESCRIPTIVE_NAMES.length + 1}`;
             nameIdx++;
           } while (scope.hasBinding(newName) || GLOBALS.has(newName) || unboundNames.has(newName) || descendantNames.has(newName));
+
+          if (annexBProtectedNames.has(name)) continue;
 
           // Use Babel's scope.rename for safe, correct renaming
           scope.rename(name, newName);
