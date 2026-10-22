@@ -191,7 +191,7 @@ export const SHAPE_CASES: readonly ShapeCase[] = [
   { id: "S12", src: "var a=inp.k*4,b=inp.k,c=inp.k;\nout.push((a)/b/c, a++ / b, [4][0]/2);\n", base: "var a = inp.k * 4, b = inp.k, c = inp.k;\nout.push((a) / b / c, a++ / b, [4][0] / 2);\n" },
   { id: "S13", src: "class A { static #p = 2; static s = 3; static async *g(){ yield 1; } m(){ return A.#p + A.s; } }\nout.push(new A().m());\n", base: "class A {\n  static#p = 2;\n  static s = 3;\n  static async  * g() {\n    yield 1;\n  }\n  m() {\n    return A.#p + A.s;\n  }\n}\nout.push(new A().m());\n" },
   { id: "S14", src: "var o=null;\nout.push(o?.a, o?.[1], 1?.5:2);\n", base: "var o = null;\nout.push(o?.a, o?.[1], 1?.5: 2);\n" },
-  { id: "S15", src: "var o={if:1,class:2,new:3};\nout.push(o.if+o.class+o.new);\nL: for(;;){ break L; }\n", base: "var o = {\n  if : 1,\n  class: 2,\n  new: 3\n};\nout.push(o. if +o.class +o.new);\nL: for (; ; ) {\n  break L;\n}\n" },
+  { id: "S15", src: "var o={if:1,class:2,new:3};\nout.push(o.if+o.class+o.new);\nL: for(;;){ break L; }\n", base: "var o = {\n  if : 1,\n  class: 2,\n  new: 3\n};\nout.push(o.if + o.class + o.new);\nL: for (; ; ) {\n  break L;\n}\n" },
   { id: "S16", src: "out.push('a\\\nb');\n", base: "out.push('a\\\nb');\n" },
   { id: "S17", src: "// a\u2028out.push(1);\nout.push(2);\n", base: "// a\u2028out.push(1);out.push(2);\n" },
 ];

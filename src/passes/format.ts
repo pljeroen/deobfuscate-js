@@ -498,6 +498,9 @@ export const formatPass: FormatPass = {
     for (; i < significantTokens.length; i++) {
       const tok = significantTokens[i];
       const prevTok = i > 0 ? significantTokens[i - 1] : undefined;
+      const nextTok = significantTokens[i + 1];
+      const controlKeywordIsProperty = tok.type === TokenType.Keyword && KEYWORD_SPACE.has(tok.value) &&
+        prevTok?.type === TokenType.Punctuator && (prevTok.value === "." || prevTok.value === "?.");
 
       if (tok.type === TokenType.LineTerminator) {
         newline();
@@ -505,7 +508,7 @@ export const formatPass: FormatPass = {
       }
 
       // Track for-loop parentheses to suppress semicolon line breaks
-      if (tok.type === TokenType.Keyword && tok.value === "for") {
+      if (tok.type === TokenType.Keyword && tok.value === "for" && !controlKeywordIsProperty && nextTok?.value !== ":") {
         inForHeader = true;
       }
 
@@ -621,7 +624,7 @@ export const formatPass: FormatPass = {
             const beforePrevTok = i > 1 ? significantTokens[i - 2] : undefined;
             const keywordIsProperty = beforePrevTok?.type === TokenType.Punctuator &&
               (beforePrevTok.value === "." || beforePrevTok.value === "?.");
-            const unarySign = (tok.value === "-" || tok.value === "+") && isUnarySign(prevTok);
+            const unarySign = !keywordIsProperty && (tok.value === "-" || tok.value === "+") && isUnarySign(prevTok);
             const operatorProvidesLeadingSpace = ASSIGNMENT_OPS.has(tok.value) ||
               (BINARY_OPS.has(tok.value) && !unarySign);
             if (prevTok && prevTok.type === TokenType.Keyword && KEYWORD_NEEDS_SPACE.has(prevTok.value) &&
@@ -654,7 +657,7 @@ export const formatPass: FormatPass = {
       }
 
       // Keywords that take a parenthesized condition — emit with trailing space
-      if (tok.type === TokenType.Keyword && KEYWORD_SPACE.has(tok.value)) {
+      if (tok.type === TokenType.Keyword && KEYWORD_SPACE.has(tok.value) && !controlKeywordIsProperty) {
         emitIndent();
         emitWordSep();
         emit(tok.value);

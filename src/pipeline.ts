@@ -296,14 +296,28 @@ function reparseGenerated(code: string, initial: ParseOutcome): Reparse {
   return { ok: true, parsed };
 }
 
-function runReported(
+interface ASTPhaseResult {
+  code: string;
+  iterations: number;
+  initialEntropy: number;
+  finalEntropy: number;
+  initialParse: ParseOutcome;
+  inputStatementCount: number;
+  finalStatementCount: number;
+  emptiedBy?: { name: string; iteration: number };
+}
+
+/**
+ * Complete the AST-only phase in its own activation so its parse trees and
+ * transactional state are unreachable before token passes begin.
+ */
+function runASTPhaseReported(
   source: string,
   astPasses: ASTPass[],
-  tokenPasses: TokenPass[],
   warnings: string[],
-): PipelineResult {
-  const report: PassReport[] = [];
-  const passStatementCounts: PassStatementCount[] = [];
+  report: PassReport[],
+  passStatementCounts: PassStatementCount[],
+): ASTPhaseResult {
   // the last invocation that emptied the program, among the iterations kept so far
   let emptiedBy: { name: string; iteration: number } | undefined;
 
@@ -411,7 +425,29 @@ function runReported(
   const finalEntropy = identifierEntropy(ast);
   const finalStatementCount = statementCount(ast);
 
-  let code = previousCode || generate(ast);
+  return {
+    code: previousCode || generate(ast),
+    iterations,
+    initialEntropy,
+    finalEntropy,
+    initialParse,
+    inputStatementCount,
+    finalStatementCount,
+    ...(inputStatementCount > 0 && finalStatementCount === 0 && emptiedBy !== undefined ? { emptiedBy } : {}),
+  };
+}
+
+function runReported(
+  source: string,
+  astPasses: ASTPass[],
+  tokenPasses: TokenPass[],
+  warnings: string[],
+): PipelineResult {
+  const report: PassReport[] = [];
+  const passStatementCounts: PassStatementCount[] = [];
+  const astPhase = runASTPhaseReported(source, astPasses, warnings, report, passStatementCounts);
+  let code = astPhase.code;
+
   for (const pass of tokenPasses) {
     const before = code;
     try {
@@ -437,13 +473,13 @@ function runReported(
     code,
     warnings,
     report,
-    iterations,
-    initialEntropy,
-    finalEntropy,
-    initialParse,
-    inputStatementCount,
-    finalStatementCount,
+    iterations: astPhase.iterations,
+    initialEntropy: astPhase.initialEntropy,
+    finalEntropy: astPhase.finalEntropy,
+    initialParse: astPhase.initialParse,
+    inputStatementCount: astPhase.inputStatementCount,
+    finalStatementCount: astPhase.finalStatementCount,
     passStatementCounts,
-    ...(inputStatementCount > 0 && finalStatementCount === 0 && emptiedBy !== undefined ? { emptiedBy } : {}),
+    ...(astPhase.emptiedBy === undefined ? {} : { emptiedBy: astPhase.emptiedBy }),
   };
 }
