@@ -264,6 +264,34 @@ function unflattenArithmeticDispatch(whilePath: NodePath<t.WhileStatement>): boo
   if (!t.isNumericLiteral(initNode)) return false;
   const initialState = initNode.value;
 
+  // The initializer is a sound entry value only when its declaration and the
+  // dispatcher are ordered siblings in the exact same statement list. This
+  // also admits safe re-entry: a repeated containing list reruns the earlier
+  // declaration before every entry to the later while.
+  const stateDeclarationPath = stateBinding.path.parentPath;
+  if (!stateDeclarationPath?.isVariableDeclaration()) return false;
+  if (
+    stateDeclarationPath.parentPath !== whilePath.parentPath ||
+    stateDeclarationPath.listKey === null ||
+    stateDeclarationPath.listKey !== whilePath.listKey ||
+    stateDeclarationPath.container !== whilePath.container ||
+    !Array.isArray(stateDeclarationPath.container) ||
+    typeof stateDeclarationPath.key !== "number" ||
+    typeof whilePath.key !== "number" ||
+    stateDeclarationPath.key >= whilePath.key
+  ) {
+    return false;
+  }
+
+  // Resolve candidate assignments through their paths so a same-named shadow
+  // binding can never be mistaken for a transition of the dispatcher binding.
+  const assignmentPaths = new Map<t.AssignmentExpression, NodePath<t.AssignmentExpression>>();
+  whilePath.traverse({
+    AssignmentExpression(path: NodePath<t.AssignmentExpression>) {
+      assignmentPaths.set(path.node, path);
+    },
+  });
+
   // Build case map: numeric case label → { body statements, next state }
   const caseMap = new Map<number, { stmts: t.Statement[]; nextState: number | null }>();
   const modeledStateAssignments = new Set<t.AssignmentExpression>();
@@ -320,6 +348,16 @@ function unflattenArithmeticDispatch(whilePath: NodePath<t.WhileStatement>): boo
       ) {
         if (nextState !== null) return false;
 
+        const assignmentPath = assignmentPaths.get(stmt.expression);
+        if (!assignmentPath) return false;
+        const assignmentTargetPath = assignmentPath.get("left");
+        if (
+          !assignmentTargetPath.isIdentifier() ||
+          assignmentTargetPath.scope.getBinding(assignmentTargetPath.node.name) !== stateBinding
+        ) {
+          return false;
+        }
+
         // state = constant
         if (t.isNumericLiteral(stmt.expression.right)) {
           nextState = stmt.expression.right.value;
@@ -359,6 +397,9 @@ function unflattenArithmeticDispatch(whilePath: NodePath<t.WhileStatement>): boo
 
     let current: NodePath | null = violation;
     while (current !== null) {
+      if (current.isFunction()) {
+        return true;
+      }
       if (current.isSwitchCase() && terminalCases.has(current.node)) {
         return false;
       }

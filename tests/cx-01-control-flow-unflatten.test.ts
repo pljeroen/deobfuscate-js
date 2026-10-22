@@ -370,4 +370,264 @@ describe("arithmetic control-flow unflattening preserves program behavior", () =
     expectSuccessfulOutput(executeProgram(source), expected);
     expectSuccessfulOutput(executeProgram(transformed.code), expected);
   });
+
+  const nonDominatingEntryShapes = [
+    {
+      id: "declaration-after-loop",
+      source: `
+        globalThis.effects = [];
+        while (true) {
+          switch (_0xstate) {
+            case 0: globalThis.effects.push("entered"); _0xstate = 1; continue;
+            case 1: break;
+          }
+          break;
+        }
+        var _0xstate = 0;
+        process.stdout.write(JSON.stringify(globalThis.effects));
+      `,
+    },
+    {
+      id: "declaration-in-untaken-conditional",
+      source: `
+        globalThis.effects = [];
+        if (false) {
+          var _0xstate = 0;
+        }
+        while (true) {
+          switch (_0xstate) {
+            case 0: globalThis.effects.push("entered"); _0xstate = 1; continue;
+            case 1: break;
+          }
+          break;
+        }
+        process.stdout.write(JSON.stringify(globalThis.effects));
+      `,
+    },
+  ] as const;
+
+  it.each(nonDominatingEntryShapes)(
+    "[RED-CX-11] [CX-W11:$id] refuses a dispatcher whose initializer does not dominate loop entry",
+    ({ source }) => {
+      const expected = "[]";
+      const transformed = transform(source);
+      const sourceExecution = executeProgram(source);
+      const transformedExecution = executeProgram(transformed.code);
+
+      expectSuccessfulOutput(sourceExecution, expected);
+      expect({
+        timedOut: transformedExecution.timedOut,
+        status: transformedExecution.status,
+        signal: transformedExecution.signal,
+        stderr: transformedExecution.stderr,
+        stdout: transformedExecution.stdout,
+        changed: transformed.changed,
+        arithmeticSwitches: arithmeticSwitchCount(transformed.code),
+      }).toEqual({
+        timedOut: false,
+        status: 0,
+        signal: null,
+        stderr: "",
+        stdout: sourceExecution.stdout,
+        changed: false,
+        arithmeticSwitches: 1,
+      });
+    },
+  );
+
+  const reenteredWithoutInitializationShapes = [
+    {
+      id: "initializer-outside-enclosing-loop",
+      source: `
+        var _0xstate = 0;
+        globalThis.effects = [];
+        for (let outer = 0; outer < 2; outer++) {
+          while (true) {
+            switch (_0xstate) {
+              case 0: globalThis.effects.push("step"); _0xstate = 1; continue;
+              case 1: break;
+            }
+            break;
+          }
+        }
+        process.stdout.write(JSON.stringify(globalThis.effects));
+      `,
+    },
+    {
+      id: "initializer-outside-repeated-function",
+      source: `
+        var _0xstate = 0;
+        globalThis.effects = [];
+        function runDispatcher() {
+          while (true) {
+            switch (_0xstate) {
+              case 0: globalThis.effects.push("step"); _0xstate = 1; continue;
+              case 1: break;
+            }
+            break;
+          }
+        }
+        runDispatcher();
+        runDispatcher();
+        process.stdout.write(JSON.stringify(globalThis.effects));
+      `,
+    },
+  ] as const;
+
+  it.each(reenteredWithoutInitializationShapes)(
+    "[RED-CX-12] [CX-W12:$id] refuses re-entry when the initializer does not execute again",
+    ({ source }) => {
+      const expected = '["step"]';
+      const transformed = transform(source);
+      const sourceExecution = executeProgram(source);
+      const transformedExecution = executeProgram(transformed.code);
+
+      expectSuccessfulOutput(sourceExecution, expected);
+      expect({
+        timedOut: transformedExecution.timedOut,
+        status: transformedExecution.status,
+        signal: transformedExecution.signal,
+        stderr: transformedExecution.stderr,
+        stdout: transformedExecution.stdout,
+        changed: transformed.changed,
+        arithmeticSwitches: arithmeticSwitchCount(transformed.code),
+      }).toEqual({
+        timedOut: false,
+        status: 0,
+        signal: null,
+        stderr: "",
+        stdout: sourceExecution.stdout,
+        changed: false,
+        arithmeticSwitches: 1,
+      });
+    },
+  );
+
+  it("[RED-CX-13] [CX-W13] refuses a terminal-case write that crosses a function boundary", () => {
+    const source = `
+      var _0xstate = 0;
+      while (true) {
+        switch (_0xstate) {
+          case 0: _0xstate = 1; rewriteState(); continue;
+          case 1:
+            function rewriteState() { _0xstate = 2; }
+            globalThis.selected = "wrong";
+            break;
+          case 2: globalThis.selected = "right"; break;
+        }
+        break;
+      }
+      process.stdout.write(String(globalThis.selected));
+    `;
+    const expected = "right";
+    const transformed = transform(source);
+    const sourceExecution = executeProgram(source);
+    const transformedExecution = executeProgram(transformed.code);
+
+    expectSuccessfulOutput(sourceExecution, expected);
+    expect({
+      timedOut: transformedExecution.timedOut,
+      status: transformedExecution.status,
+      signal: transformedExecution.signal,
+      stderr: transformedExecution.stderr,
+      stdout: transformedExecution.stdout,
+      changed: transformed.changed,
+      arithmeticSwitches: arithmeticSwitchCount(transformed.code),
+    }).toEqual({
+      timedOut: false,
+      status: 0,
+      signal: null,
+      stderr: "",
+      stdout: sourceExecution.stdout,
+      changed: false,
+      arithmeticSwitches: 1,
+    });
+  });
+
+  it("[RED-CX-14] [CX-W14] refuses an apparent transition to a same-named foreign binding", () => {
+    const source = `
+      var _0xstate = 0;
+      globalThis.count = 0;
+      while (true) {
+        switch (_0xstate) {
+          case 0:
+            _0xstate = 1;
+            globalThis.count++;
+            if (globalThis.count === 2) {
+              globalThis.selected = "right";
+              process.stdout.write(JSON.stringify({selected: globalThis.selected, count: globalThis.count}));
+              process.exit(0);
+            }
+            continue;
+          case 1: globalThis.selected = "wrong"; break;
+          case 2: function _0xstate() {} break;
+        }
+        break;
+      }
+      process.stdout.write(JSON.stringify({selected: globalThis.selected, count: globalThis.count}));
+    `;
+    const expected = '{"selected":"right","count":2}';
+    const transformed = transform(source);
+    const sourceExecution = executeProgram(source);
+    const transformedExecution = executeProgram(transformed.code);
+
+    expectSuccessfulOutput(sourceExecution, expected);
+    expect({
+      timedOut: transformedExecution.timedOut,
+      status: transformedExecution.status,
+      signal: transformedExecution.signal,
+      stderr: transformedExecution.stderr,
+      stdout: transformedExecution.stdout,
+      changed: transformed.changed,
+      arithmeticSwitches: arithmeticSwitchCount(transformed.code),
+    }).toEqual({
+      timedOut: false,
+      status: 0,
+      signal: null,
+      stderr: "",
+      stdout: sourceExecution.stdout,
+      changed: false,
+      arithmeticSwitches: 1,
+    });
+  });
+
+  it("[RED-CX-15] [CX-W15] linearizes safe re-entry when initialization and dispatch are ordered siblings", () => {
+    const source = `
+      globalThis.effects = [];
+      for (let outer = 0; outer < 2; outer++) {
+        let _0xstate = 0;
+        while (true) {
+          switch (_0xstate) {
+            case 0: globalThis.effects.push("step"); _0xstate = 1; continue;
+            case 1: break;
+          }
+          break;
+        }
+      }
+      process.stdout.write(JSON.stringify(globalThis.effects));
+    `;
+    const expected = '["step","step"]';
+    const transformed = transform(source);
+    const sourceExecution = executeProgram(source);
+    const transformedExecution = executeProgram(transformed.code);
+
+    expectSuccessfulOutput(sourceExecution, expected);
+    expect({
+      timedOut: transformedExecution.timedOut,
+      status: transformedExecution.status,
+      signal: transformedExecution.signal,
+      stderr: transformedExecution.stderr,
+      stdout: transformedExecution.stdout,
+      changed: transformed.changed,
+      arithmeticSwitches: arithmeticSwitchCount(transformed.code),
+    }).toEqual({
+      timedOut: false,
+      status: 0,
+      signal: null,
+      stderr: "",
+      stdout: sourceExecution.stdout,
+      changed: true,
+      arithmeticSwitches: 0,
+    });
+  });
 });
