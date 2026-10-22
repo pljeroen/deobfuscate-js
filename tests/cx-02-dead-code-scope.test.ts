@@ -67,6 +67,30 @@ function expectPipelineRetainedBlock(source: string, declarationType: "ClassDecl
   expect(block?.body.some((statement) => statement.type === declarationType)).toBe(true);
 }
 
+function outerFunctionBody(code: string): t.BlockStatement {
+  const outer = parse(code).program.body.find((statement) => t.isFunctionDeclaration(statement));
+  expect(outer?.type).toBe("FunctionDeclaration");
+  return t.isFunctionDeclaration(outer) ? outer.body : t.blockStatement([]);
+}
+
+function expectRetainedAnnexBBlock(
+  code: string,
+  lexicalDeclarationExpectation: "present" | "absent" | "unconstrained",
+): void {
+  const selected = outerFunctionBody(code).body.find((statement) => t.isBlockStatement(statement));
+  expect(selected?.type).toBe("BlockStatement");
+  const selectedBody = t.isBlockStatement(selected) ? selected.body : [];
+  expect(selectedBody.some((statement) => t.isFunctionDeclaration(statement))).toBe(true);
+  if (lexicalDeclarationExpectation !== "unconstrained") {
+    expect(selectedBody.some((statement) => t.isVariableDeclaration(statement) && statement.kind === "let"))
+      .toBe(lexicalDeclarationExpectation === "present");
+  }
+}
+
+function directFunctionBodyDeclarationCount(code: string): number {
+  return outerFunctionBody(code).body.filter((statement) => t.isFunctionDeclaration(statement)).length;
+}
+
 function lines(text: string): string[] {
   const result = text.split("\n");
   if (result.at(-1) === "") result.pop();
@@ -319,4 +343,73 @@ describe("CX-02 selected dead-code branch scope preservation", () => {
       globals: { answer: "undefined" },
     });
   }, 120_000);
+
+  const annexBCases = [
+    {
+      name: "S1 truthy consequent",
+      source: "function outer() { if (true) { function f() { return 1; } } return f(); } globalThis.answer = outer();",
+      answer: 1,
+      withLexicalDeclaration: false,
+    },
+    {
+      name: "S5 falsy alternate",
+      source: "function outer() { if (false) { globalThis.dead = 1; } else { function g() { return 2; } } return g(); } globalThis.answer = outer();",
+      answer: 2,
+      withLexicalDeclaration: false,
+    },
+    {
+      name: "P2 let plus function",
+      source: "function outer() { if (true) { let z = 1; function f() { return z; } } return f(); } globalThis.answer = outer();",
+      answer: 1,
+      withLexicalDeclaration: true,
+    },
+  ] as const;
+
+  it.each(annexBCases)("direct and default pipeline preserve Annex B outer binding for $name", ({ source, answer, withLexicalDeclaration }) => {
+    const direct = directCode(source);
+    const pipeline = defaultPipeline(source);
+    const expected: Execution = { completion: "normal", globals: { answer } };
+
+    expectRetainedAnnexBBlock(direct, withLexicalDeclaration ? "present" : "absent");
+    expectRetainedAnnexBBlock(pipeline.code, withLexicalDeclaration ? "unconstrained" : "absent");
+    expect(pipeline.warnings).toEqual([]);
+    expect(executeFresh(source, ["answer"])).toEqual(expected);
+    expect(executeFresh(direct, ["answer"])).toEqual(expected);
+    expect(executeFresh(pipeline.code, ["answer"])).toEqual(expected);
+  });
+
+  const annexBCliCases = annexBCases.flatMap((testCase) => [
+    { ...testCase, mode: "default", unsafe: false },
+    { ...testCase, mode: "--unsafe", unsafe: true },
+  ]);
+
+  it.each(annexBCliCases)("real CLI $mode preserves Annex B outer binding for $name", ({ source, answer, unsafe }) => {
+    const result = runCli(source, unsafe);
+    const warningsAndErrors = result.stderrLines.filter((line) => /^(WARNING|ERROR):/.test(line));
+
+    expect(result.signal).toBeNull();
+    expect(result.status, result.stderrLines.join("\n")).toBe(0);
+    expect(warningsAndErrors).toEqual(unsafe ? [UNSAFE_NOTICE] : []);
+    expect(result.stdoutLines.filter((line) => line.startsWith("Done: "))).toHaveLength(1);
+    expect(result.output).toBeDefined();
+    expect(executeFresh(result.output ?? "", ["answer"])).toEqual({
+      completion: "normal",
+      globals: { answer },
+    });
+  }, 120_000);
+
+  it("still removes an ordinary unreferenced function declaration directly in a function body", () => {
+    const source = "function outer() { function unused() { return 1; } return 2; } globalThis.answer = outer();";
+    const direct = directCode(source);
+    const pipeline = defaultPipeline(source);
+    const expected: Execution = { completion: "normal", globals: { answer: 2 } };
+
+    expect(directFunctionBodyDeclarationCount(source)).toBe(1);
+    expect(directFunctionBodyDeclarationCount(direct)).toBe(0);
+    expect(directFunctionBodyDeclarationCount(pipeline.code)).toBe(0);
+    expect(pipeline.warnings).toEqual([]);
+    expect(executeFresh(source, ["answer"])).toEqual(expected);
+    expect(executeFresh(direct, ["answer"])).toEqual(expected);
+    expect(executeFresh(pipeline.code, ["answer"])).toEqual(expected);
+  });
 });

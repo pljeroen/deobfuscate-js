@@ -155,6 +155,13 @@ export const deadCodeEliminatePass: ASTPass = {
         if (!path.node.id || !t.isIdentifier(path.node.id)) return;
         // Only remove if nested inside another function
         if (!path.parentPath?.getFunctionParent()) return;
+        const parent = path.parentPath;
+        const isFunctionBody =
+          parent.isBlockStatement() && parent.parentPath?.isFunction() && parent.key === "body";
+        // Sloppy block functions can expose an Annex B binding outside the block.
+        if (!path.isInStrictMode() && (parent.isSwitchCase() || (parent.isBlockStatement() && !isFunctionBody))) {
+          return;
+        }
         const binding = path.scope.getBinding(path.node.id.name);
         if (!binding) return;
         if (binding.referencePaths.length > 0) return;
