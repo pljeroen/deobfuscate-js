@@ -13,6 +13,8 @@ import { formatPass } from "../src/passes/format.js";
 import { astRenamePass } from "../src/passes/ast-rename.js";
 import { antiDebugPass } from "../src/passes/anti-debug.js";
 import { constantFoldPass } from "../src/passes/constant-fold.js";
+import { controlFlowObjectPass } from "../src/passes/control-flow-object.js";
+import { bundlerUnpackPass } from "../src/passes/bundler-unpack.js";
 import { constantPropagatePass } from "../src/passes/constant-propagate.js";
 import { semanticRenamePass } from "../src/passes/semantic-rename.js";
 import { filterSafePasses, runPipelineWithReport } from "../src/pipeline.js";
@@ -744,6 +746,271 @@ function warningBoundaryResult(kind: "labelled" | "if-clause"): {
   };
 }
 
+
+type NormalizedValue = null | boolean | number | string | NormalizedValue[] | { [key: string]: NormalizedValue };
+type RuntimeOutcome = {
+  completion: "normal" | "throw";
+  errorConstructor: string | null;
+  globals: Record<string, NormalizedValue>;
+};
+
+function normalizedValue(value: unknown): NormalizedValue {
+  if (value === undefined) return "<undefined>";
+  if (value === null || typeof value === "boolean" || typeof value === "string") return value;
+  if (typeof value === "number") {
+    if (Number.isNaN(value)) return "<NaN>";
+    if (!Number.isFinite(value)) return value > 0 ? "<Infinity>" : "<-Infinity>";
+    return Object.is(value, -0) ? "<-0>" : value;
+  }
+  if (typeof value === "bigint") return value.toString() + "n";
+  if (typeof value === "function") return "<function:" + value.name + ">";
+  if (Array.isArray(value)) return Array.from(value, normalizedValue);
+  if (typeof value === "object") {
+    return Object.fromEntries(Object.keys(value as object).sort().map(
+      (key) => [key, normalizedValue(Reflect.get(value as object, key))],
+    ));
+  }
+  return "<" + typeof value + ">";
+}
+
+function executeNormalized(source: string, observed: readonly string[]): RuntimeOutcome {
+  const context = vm.createContext(Object.create(null));
+  const globals = (): Record<string, NormalizedValue> =>
+    Object.fromEntries(observed.map((name) => [name, normalizedValue(Reflect.get(context, name))]));
+  try {
+    vm.runInContext(source, context, { timeout: 2_000 });
+    return { completion: "normal", errorConstructor: null, globals: globals() };
+  } catch (error: unknown) {
+    const errorConstructor =
+      typeof error === "object" && error !== null && "constructor" in error
+        ? String((error as { constructor?: { name?: unknown } }).constructor?.name ?? typeof error)
+        : typeof error;
+    return { completion: "throw", errorConstructor, globals: globals() };
+  }
+}
+
+function safeAndAll(
+  source: string,
+  observed: readonly string[],
+): Array<{ layer: "safe" | "all"; outcome: RuntimeOutcome; warnings: string[]; code: string }> {
+  return [
+    { layer: "safe" as const, passes: safeASTPasses },
+    { layer: "all" as const, passes: allASTPasses },
+  ].map(({ layer, passes }) => {
+    const result = runPipelineWithReport(source, passes, [formatPass]);
+    return { layer, outcome: executeNormalized(result.code, observed), warnings: result.warnings, code: result.code };
+  });
+}
+
+type PropertyPlacement = "BlockStatement" | "SwitchCase";
+function propertyFunction(name: string, placement: PropertyPlacement, value: number): string {
+  const declaration = "function " + name + "() { return " + value + "; }";
+  return placement === "BlockStatement"
+    ? "if (true) { " + declaration + " }"
+    : "switch (1) { case 1: " + declaration + " }";
+}
+
+type DestinationSpec = {
+  id: string;
+  destination: string;
+  kind: "declaration" | "error" | "event";
+  declaration?: (name: string) => string;
+  observation: (name: string) => string;
+};
+const destinationSpecs: DestinationSpec[] = [
+  { id: "array", destination: "arr", kind: "declaration",
+    declaration: (n) => "var " + n + " = []; " + n + ".push(7);",
+    observation: (n) => "typeof " + n + " + ':' + " + n + ".length" },
+  { id: "regex", destination: "pattern", kind: "declaration",
+    declaration: (n) => "var " + n + " = /a/;",
+    observation: (n) => "typeof " + n + " + ':' + " + n + ".test('a')" },
+  { id: "arithmetic", destination: "num", kind: "declaration",
+    declaration: (n) => "var " + n + " = 2; " + n + " = " + n + " * 3;",
+    observation: (n) => "typeof " + n + " + ':' + (" + n + " + 1)" },
+  { id: "length", destination: "len", kind: "declaration",
+    declaration: (n) => "var " + n + " = String(12345).length;",
+    observation: (n) => "typeof " + n + " + ':' + " + n },
+  { id: "json", destination: "data", kind: "declaration",
+    declaration: (n) => "var " + n + " = JSON.parse('[1,2]');",
+    observation: (n) => "typeof " + n + " + ':' + " + n + ".length" },
+  { id: "error-first", destination: "err", kind: "error",
+    observation: (n) => "typeof " + n + " + ':' + (" + n + " === null)" },
+  { id: "event", destination: "event", kind: "event",
+    observation: (n) => "typeof " + n + " + ':' + " + n + ".type" },
+];
+type DestinationOwner = "Program" | "nested";
+type DestinationTuple = {
+  spec: DestinationSpec;
+  owner: DestinationOwner;
+  placement: PropertyPlacement;
+  fingerprint: FingerprintState;
+};
+const destinationTuples: DestinationTuple[] = destinationSpecs.flatMap((spec) =>
+  (["Program", "nested"] as const).flatMap((owner) =>
+    (["BlockStatement", "SwitchCase"] as const).flatMap((placement) =>
+      (["inactive", "active"] as const).map((fingerprint) => ({ spec, owner, placement, fingerprint })),
+    ),
+  ),
+);
+const rejectedDestinationTuples = destinationTuples.filter(
+  ({ spec, owner }) => spec.kind !== "declaration" && owner === "Program",
+);
+function destinationProgram(tuple: DestinationTuple, index: number): string {
+  const n = "_0xv";
+  const selected = propertyFunction(tuple.spec.destination, tuple.placement, 900 + index);
+  const observation = tuple.spec.observation(n);
+  let source: string;
+  if (tuple.spec.kind === "declaration" && tuple.owner === "Program") {
+    source = (tuple.spec.declaration?.(n) ?? "") + " " + selected +
+      " globalThis.answer = JSON.stringify(" + observation + ");";
+  } else if (tuple.spec.kind === "declaration") {
+    source = "function outer() { " + (tuple.spec.declaration?.(n) ?? "") +
+      " function inner() { " + selected + " return " + observation +
+      "; } return inner(); } globalThis.answer = JSON.stringify(outer());";
+  } else if (tuple.spec.kind === "error") {
+    source = "function outer(" + n + ", callback) { if (" + n + ") return 'handled'; " +
+      "function inner() { " + selected + " return " + observation +
+      "; } return inner(); } globalThis.answer = JSON.stringify(outer(null, function () {}));";
+  } else {
+    source = "var target = { addEventListener: function (type, handler) { return handler({ type: type }); } };" +
+      " globalThis.answer = JSON.stringify(target.addEventListener('tick', function (" + n +
+      ") { function inner() { " + selected + " return " + observation +
+      "; } return inner(); }));";
+  }
+  return withFingerprint(source, tuple.fingerprint);
+}
+const destinationRows = destinationTuples
+  .filter(({ spec, owner }) => spec.kind === "declaration" || owner === "nested")
+  .map((tuple, index) => ({
+    ...tuple,
+    id: ["destination", tuple.spec.id, tuple.owner, tuple.placement, tuple.fingerprint].join("|"),
+    source: destinationProgram(tuple, index),
+    baseCorrect: !(tuple.owner === "Program" && tuple.placement === "SwitchCase"),
+  }));
+
+type CloneSpec = {
+  id: string;
+  destination: string;
+  declaration: (name: string) => string;
+  observation: (name: string) => string;
+};
+const cloneSpecs: CloneSpec[] = [
+  { id: "array", destination: "arr", declaration: (n) => "var " + n + " = []; " + n + ".push(7);", observation: (n) => n + ".length" },
+  { id: "regex", destination: "pattern", declaration: (n) => "var " + n + " = /a/;", observation: (n) => n + ".test('a')" },
+  { id: "arithmetic", destination: "num", declaration: (n) => "var " + n + " = 2; " + n + " = " + n + " * 3;", observation: (n) => "(" + n + " + 1)" },
+  { id: "length", destination: "len", declaration: (n) => "var " + n + " = String(12345).length;", observation: (n) => n },
+  { id: "json", destination: "data", declaration: (n) => "var " + n + " = JSON.parse('[1,2]');", observation: (n) => n + ".length" },
+  { id: "counter", destination: "i", declaration: (n) => "for (var " + n + " = 0; " + n + " < 3; " + n + "++) {}", observation: (n) => n },
+];
+type CloneTuple = {
+  spec: CloneSpec;
+  linked: "numeric" | "object";
+  owner: "same" | "nested";
+  placement: PropertyPlacement;
+  order: "trigger-first" | "linked-first";
+  shape: "proxy-clone" | "direct-control";
+};
+const cloneTuples: CloneTuple[] = cloneSpecs.flatMap((spec) =>
+  (["numeric", "object"] as const).flatMap((linked) =>
+    (["same", "nested"] as const).flatMap((owner) =>
+      (["BlockStatement", "SwitchCase"] as const).flatMap((placement) =>
+        (["trigger-first", "linked-first"] as const).flatMap((order) =>
+          (["proxy-clone", "direct-control"] as const).map((shape) =>
+            ({ spec, linked, owner, placement, order, shape })),
+        ),
+      ),
+    ),
+  ),
+);
+const CONTROL_FLOW_PROXY = "var _0xobj = { 'abc': function (_0xa, _0xb) { return _0xa(_0xb); } };";
+function cloneProgram(tuple: CloneTuple): string {
+  const n = "_0xf";
+  const trigger = "function (_0xq) { " + tuple.spec.declaration(n) +
+    " return " + tuple.spec.observation(n) + "; }";
+  const linkedDeclaration = tuple.linked === "numeric"
+    ? "var " + n + " = _0xq + 1;"
+    : "var " + n + " = { k: _0xq };";
+  const selected = propertyFunction(n, tuple.placement, 5);
+  const linked = tuple.owner === "nested"
+    ? "function (_0xq) { " + linkedDeclaration + " function inner() { " + selected +
+      " return " + n + "(); } return [inner(), typeof " + n + "]; }"
+    : "function (_0xq) { " + linkedDeclaration + " " + selected +
+      " return [" + n + "(), typeof " + n + "]; }";
+  const call = (body: string): string => tuple.shape === "proxy-clone"
+    ? "_0xobj['abc'](" + body + ", 10)"
+    : "(" + body + ")(10)";
+  const first = "globalThis.r1 = JSON.stringify(" + call(trigger) + ");";
+  const second = "globalThis.answer = JSON.stringify(" + call(linked) + ");";
+  return CONTROL_FLOW_PROXY + " " +
+    (tuple.order === "trigger-first" ? first + " " + second : second + " " + first) +
+    ACTIVE_FINGERPRINT_SUFFIX;
+}
+const cloneRows = cloneTuples.map((tuple) => ({
+  ...tuple,
+  id: ["clone", tuple.spec.id, tuple.linked, tuple.owner, tuple.placement, tuple.order, tuple.shape].join("|"),
+  source: cloneProgram(tuple),
+  baseCorrect: tuple.placement === "BlockStatement" && tuple.owner === "nested",
+}));
+
+function declarationCounts(code: string, names: readonly string[]): Record<string, number> {
+  const counts = Object.fromEntries(names.map((name) => [name, 0]));
+  traverse(parse(code), {
+    VariableDeclarator(path: { node: t.VariableDeclarator }) {
+      if (t.isIdentifier(path.node.id) && path.node.id.name in counts) counts[path.node.id.name] += 1;
+    },
+    FunctionDeclaration(path: { node: t.FunctionDeclaration }) {
+      if (path.node.id && path.node.id.name in counts) counts[path.node.id.name] += 1;
+    },
+  });
+  return counts;
+}
+function positionlessBindingShape(source: string): { distinct: number; starts: Array<number | null> } {
+  const bindings = new Set<{ identifier: { start?: number | null } }>();
+  traverse(controlFlowObjectPass.run(parse(source), source), {
+    Scope(path: { scope: { getOwnBinding(name: string): unknown } }) {
+      const binding = path.scope.getOwnBinding("_0xf") as { identifier: { start?: number | null } } | undefined;
+      if (binding) bindings.add(binding as { identifier: { start?: number | null } });
+    },
+  });
+  return {
+    distinct: bindings.size,
+    starts: Array.from(bindings, (binding) => binding.identifier.start ?? null).sort(),
+  };
+}
+const BUNDLER_POSITIONLESS_SOURCE = '(function (modules) { var installed = {}; function __webpack_require__(id) { if (installed[id]) return installed[id].exports; var module = installed[id] = { exports: {} }; modules[id].call(module.exports, module, module.exports, __webpack_require__); return module.exports; } return __webpack_require__(0); })([function (module, exports, __webpack_require__) { var _0xf = /re/; module.exports = _0xf.test("re"); }, function (module, exports, __webpack_require__) { var _0xf = 1; function inner() { if (true) { function _0xf() { return 5; } } return _0xf(); } module.exports = inner() + _0xf; }]);';
+
+function bundlerPositionlessBindingShape(source: string): { distinct: number; starts: Array<number | null> } {
+  const bindings = new Set<{ identifier: { start?: number | null } }>();
+  traverse(bundlerUnpackPass.run(parse(source), source), {
+    Scope(path: { scope: { getOwnBinding(name: string): unknown } }) {
+      const binding = path.scope.getOwnBinding("_0xf") as { identifier: { start?: number | null } } | undefined;
+      if (binding) bindings.add(binding);
+    },
+  });
+  return {
+    distinct: bindings.size,
+    starts: Array.from(bindings, (binding) => binding.identifier.start ?? null).sort(),
+  };
+}
+
+const linkageRows = [
+  {
+    id: "semantic SwitchCase linked source",
+    passes: [semanticRenamePass],
+    source: "function outer() { var _0xf = []; _0xf.push(1); switch (1) { case 1: function _0xf() { return 921; } } return _0xf(); } globalThis.answer = outer();",
+  },
+  {
+    id: "constant-propagate SwitchCase linked source",
+    passes: [constantFoldPass, constantPropagatePass],
+    source: "function outer() { var s = 'b'; var f = 'a' + s; function inner() { switch (1) { case 1: function f() { return 922; } } return f(); } return inner(); } globalThis.answer = outer();",
+  },
+  {
+    id: "constant-propagate FunctionExpression self-name alias target",
+    passes: [constantPropagatePass],
+    source: "var invoke = function _0xf(reentered) { if (reentered) return 31; var alias = _0xf; if (true) { function _0xf() { return 923; } } return alias(true); }; globalThis.answer = invoke(false);",
+  },
+] as const;
+
 describe("CX-02 selected dead-code branch scope preservation", () => {
   const classCases = [
     {
@@ -1325,4 +1592,170 @@ describe("CX-02 selected dead-code branch scope preservation", () => {
     },
     120_000,
   );
+
+  it("generated destination-spelling property covers 48 valid programs and rejects impossible parameter tuples", () => {
+    const failures: string[] = [];
+    let executions = 0;
+    let baseCorrectExecutions = 0;
+    for (const row of destinationRows) {
+      const observed = ["answer", "__cx02Fingerprint"] as const;
+      const expected = executeNormalized(row.source, observed);
+      for (const result of safeAndAll(row.source, observed)) {
+        executions += 1;
+        if (row.baseCorrect) {
+          baseCorrectExecutions += 1;
+          if (result.warnings.length > 0 || JSON.stringify(result.outcome) !== JSON.stringify(expected)) {
+            failures.push(row.id + "|" + result.layer);
+          }
+        }
+      }
+    }
+    expect({
+      attempted: destinationTuples.length,
+      rejected: rejectedDestinationTuples.length,
+      rejectedKinds: Array.from(new Set(rejectedDestinationTuples.map(({ spec }) => spec.id))).sort(),
+      programs: destinationRows.length,
+      executions,
+      baseCorrectExecutions,
+      classificationOnlyExecutions: executions - baseCorrectExecutions,
+      failureCount: failures.length,
+      firstFailures: failures.slice(0, 12),
+    }).toEqual({
+      attempted: 56,
+      rejected: 8,
+      rejectedKinds: ["error-first", "event"],
+      programs: 48,
+      executions: 96,
+      baseCorrectExecutions: 76,
+      classificationOnlyExecutions: 20,
+      failureCount: 0,
+      firstFailures: [],
+    });
+  }, 600_000);
+
+  it("generated position-less clone property covers 192 programs and preserves exact Binding identity", () => {
+    const runtimeFailures: string[] = [];
+    const structuralFailures: string[] = [];
+    let executions = 0;
+    let baseCorrectExecutions = 0;
+    for (const row of cloneRows) {
+      const observed = ["r1", "answer", "__cx02Fingerprint"] as const;
+      const expected = executeNormalized(row.source, observed);
+      for (const result of safeAndAll(row.source, observed)) {
+        executions += 1;
+        if (row.baseCorrect) {
+          baseCorrectExecutions += 1;
+          if (result.warnings.length > 0 || JSON.stringify(result.outcome) !== JSON.stringify(expected)) {
+            runtimeFailures.push(row.id + "|" + result.layer);
+          }
+        }
+        const counts = declarationCounts(result.code, ["_0xf", row.spec.destination]);
+        if (counts._0xf !== 2 || counts[row.spec.destination] !== 1) {
+          structuralFailures.push(row.id + "|" + result.layer);
+        }
+      }
+    }
+    const witness = cloneRows.find(({ id }) =>
+      id === "clone|array|numeric|nested|BlockStatement|trigger-first|proxy-clone");
+    expect(witness).toBeDefined();
+    expect({
+      programs: cloneRows.length,
+      executions,
+      baseCorrectExecutions,
+      bindingShape: positionlessBindingShape(witness?.source ?? ""),
+      runtimeFailureCount: runtimeFailures.length,
+      firstRuntimeFailures: runtimeFailures.slice(0, 12),
+      structuralFailureCount: structuralFailures.length,
+      firstStructuralFailures: structuralFailures.slice(0, 12),
+    }).toEqual({
+      programs: 192,
+      executions: 384,
+      baseCorrectExecutions: 96,
+      bindingShape: { distinct: 3, starts: [null, null, null] },
+      runtimeFailureCount: 0,
+      firstRuntimeFailures: [],
+      structuralFailureCount: 0,
+      firstStructuralFailures: [],
+    });
+  }, 600_000);
+
+  it("bundler-unpack structural producer creates distinct position-less Binding objects", () => {
+    expect(bundlerPositionlessBindingShape(BUNDLER_POSITIONLESS_SOURCE)).toEqual({
+      distinct: 3,
+      starts: [null, null, null],
+    });
+  });
+
+  const destinationCliRows = destinationRows
+    .filter(({ spec, owner, placement }) =>
+      spec.id === "array" && owner === "nested" && placement === "BlockStatement")
+    .flatMap((row) => [
+      { ...row, mode: "default", unsafe: false },
+      { ...row, mode: "--unsafe", unsafe: true },
+    ]);
+  it.each(destinationCliRows)("destination property real CLI $mode $fingerprint", ({ source, unsafe }) => {
+    const observed = ["answer", "__cx02Fingerprint"] as const;
+    const expected = executeNormalized(source, observed);
+    const result = runCli(source, unsafe);
+    expect({
+      signal: result.signal,
+      status: result.status,
+      messages: result.stderrLines.filter((line) => /^(WARNING|ERROR):/.test(line)),
+      done: result.stdoutLines.filter((line) => line.startsWith("Done: ")).length,
+      present: result.output !== undefined,
+      execution: executeNormalized(result.output ?? "", observed),
+    }).toEqual({
+      signal: null,
+      status: 0,
+      messages: unsafe ? [UNSAFE_NOTICE] : [],
+      done: 1,
+      present: true,
+      execution: expected,
+    });
+  }, 120_000);
+
+  const cloneCliRows = cloneRows
+    .filter(({ id }) => id === "clone|array|numeric|nested|BlockStatement|trigger-first|proxy-clone")
+    .flatMap((row) => [
+      { ...row, mode: "default", unsafe: false },
+      { ...row, mode: "--unsafe", unsafe: true },
+    ]);
+  it.each(cloneCliRows)("position-less clone property real CLI $mode", ({ source, unsafe }) => {
+    const observed = ["r1", "answer", "__cx02Fingerprint"] as const;
+    const expected = executeNormalized(source, observed);
+    const result = runCli(source, unsafe);
+    expect({
+      signal: result.signal,
+      status: result.status,
+      messages: result.stderrLines.filter((line) => /^(WARNING|ERROR):/.test(line)),
+      done: result.stdoutLines.filter((line) => line.startsWith("Done: ")).length,
+      present: result.output !== undefined,
+      execution: executeNormalized(result.output ?? "", observed),
+    }).toEqual({
+      signal: null,
+      status: 0,
+      messages: unsafe ? [UNSAFE_NOTICE] : [],
+      done: 1,
+      present: true,
+      execution: expected,
+    });
+  }, 120_000);
+
+  it.each(linkageRows)("consumer linkage representative: $id", ({ source, passes }) => {
+    const expected = executeNormalized(source, ["answer"]);
+    const direct = runPipelineWithReport(source, [...passes], [formatPass]);
+    const production = safeAndAll(source, ["answer"]);
+    expect({
+      directWarnings: direct.warnings,
+      direct: executeNormalized(direct.code, ["answer"]),
+      productionWarnings: production.flatMap(({ warnings }) => warnings),
+      production: production.map(({ outcome }) => outcome),
+    }).toEqual({
+      directWarnings: [],
+      direct: expected,
+      productionWarnings: [],
+      production: [expected, expected],
+    });
+  });
+
 });
