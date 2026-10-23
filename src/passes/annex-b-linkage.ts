@@ -28,3 +28,24 @@ export function annexBLinkedBindings(ast: File): Set<unknown> {
 
   return linked;
 }
+
+/** Spellings of retained Annex B block functions, including declarations without an owner binding. */
+export function annexBRetainedFunctionNames(ast: File): Set<string> {
+  const names = new Set<string>();
+  traverse(ast, {
+    FunctionDeclaration(path: any) {
+      const { node, parentPath } = path;
+      if (!node.id || node.async || node.generator || path.isInStrictMode()) return;
+
+      const owner = path.getFunctionParent() ?? path.findParent((candidate: any) => candidate.isProgram());
+      if (!owner) return;
+      const belowAnnexBBoundary = parentPath.isSwitchCase()
+        || (parentPath.isBlockStatement() && (!owner.isFunction() || parentPath.node !== owner.node.body));
+      if (!belowAnnexBBoundary) return;
+
+      names.add(node.id.name);
+    },
+  });
+
+  return names;
+}
