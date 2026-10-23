@@ -16,7 +16,18 @@
 import { traverse, t } from "../babel.js";
 import type { File } from "@babel/types";
 import type { ASTPass } from "../types.js";
-import { annexBLinkedBindings, annexBRetainedFunctionNames } from "./annex-b-linkage.js";
+import { annexBLinkedBindings, annexBRetainedFunctionOwners } from "./annex-b-linkage.js";
+
+type BindingSite = {
+  scope: { hasBinding(name: string): boolean };
+  parentPath: BindingSite | null;
+};
+
+type RenameBinding = {
+  path: BindingSite;
+  referencePaths: BindingSite[];
+  constantViolations: BindingSite[];
+};
 
 const HEX_PATTERN = /_0x/;
 
@@ -32,11 +43,11 @@ export const semanticRenamePass: ASTPass = {
 
   run(ast: File): File {
     const annexBLinked = annexBLinkedBindings(ast);
-    const annexBRetainedNames = annexBRetainedFunctionNames(ast);
+    const annexBRetainedOwners = annexBRetainedFunctionOwners(ast);
     // Per-scope renames: maps the exact Babel binding object to its new name
     // This avoids the global map bug where the same old name in different scopes
     // gets the same new name even when those scopes should be independent.
-    const scopeRenames = new Map<object, { oldName: string; newName: string }>();
+    const scopeRenames = new Map<RenameBinding, { oldName: string; newName: string }>();
     const globalUsedNames = new Set<string>();
     // Track names already scheduled per scope to prevent duplicate assignments
     const scopeScheduledNames = new Map<string, Set<string>>();
@@ -111,7 +122,7 @@ export const semanticRenamePass: ASTPass = {
         } while (
           globalUsedNames.has(newName)
           || usedCounters.has(newName)
-          || annexBRetainedNames.has(newName)
+          || destinationUnavailable(binding, newName, annexBRetainedOwners)
         );
 
         usedCounters.add(newName);
@@ -137,7 +148,7 @@ export const semanticRenamePass: ASTPass = {
           t.isIdentifier(init.property) &&
           init.property.name === "length"
         ) {
-          tryAssignCandidate(path, binding, name, ["len", "length_"], scopeRenames, globalUsedNames, scopeScheduledNames, freeNames, annexBRetainedNames);
+          tryAssignCandidate(path, binding, name, ["len", "length_"], scopeRenames, globalUsedNames, scopeScheduledNames, freeNames, annexBRetainedOwners);
         }
       },
     });
@@ -178,25 +189,25 @@ export const semanticRenamePass: ASTPass = {
         });
 
         if (isErrorParam) {
-          tryAssignCandidate(path, binding, first.name, ["err", "error"], scopeRenames, globalUsedNames, scopeScheduledNames, freeNames, annexBRetainedNames);
+          tryAssignCandidate(path, binding, first.name, ["err", "error"], scopeRenames, globalUsedNames, scopeScheduledNames, freeNames, annexBRetainedOwners);
         }
       },
     });
 
     // Detect array usage: .push, .pop, .forEach, .map, .filter, .reduce, .splice, .slice
-    detectUsagePattern(ast, scopeRenames, globalUsedNames, scopeScheduledNames, annexBLinked, isArrayUsage, ["arr", "items", "list"], freeNames, annexBRetainedNames);
+    detectUsagePattern(ast, scopeRenames, globalUsedNames, scopeScheduledNames, annexBLinked, isArrayUsage, ["arr", "items", "list"], freeNames, annexBRetainedOwners);
 
     // Detect JSON.parse result
-    detectInitPattern(ast, scopeRenames, globalUsedNames, scopeScheduledNames, annexBLinked, isJsonParseInit, ["data", "parsed"], freeNames, annexBRetainedNames);
+    detectInitPattern(ast, scopeRenames, globalUsedNames, scopeScheduledNames, annexBLinked, isJsonParseInit, ["data", "parsed"], freeNames, annexBRetainedOwners);
 
     // Detect regex usage: assigned from regex literal, or .test/.exec called on it
-    detectUsagePattern(ast, scopeRenames, globalUsedNames, scopeScheduledNames, annexBLinked, isRegexUsage, ["pattern", "regex"], freeNames, annexBRetainedNames);
+    detectUsagePattern(ast, scopeRenames, globalUsedNames, scopeScheduledNames, annexBLinked, isRegexUsage, ["pattern", "regex"], freeNames, annexBRetainedOwners);
 
     // Detect arithmetic-only usage
-    detectUsagePattern(ast, scopeRenames, globalUsedNames, scopeScheduledNames, annexBLinked, isArithmeticUsage, ["num", "value"], freeNames, annexBRetainedNames);
+    detectUsagePattern(ast, scopeRenames, globalUsedNames, scopeScheduledNames, annexBLinked, isArithmeticUsage, ["num", "value"], freeNames, annexBRetainedOwners);
 
     // Detect addEventListener callback event param
-    detectEventParam(ast, scopeRenames, globalUsedNames, scopeScheduledNames, annexBLinked, freeNames, annexBRetainedNames);
+    detectEventParam(ast, scopeRenames, globalUsedNames, scopeScheduledNames, annexBLinked, freeNames, annexBRetainedOwners);
 
     // Apply renames via scope API — each binding renamed independently.
     // Guard: skip if target name already exists in the scope chain (from an earlier
@@ -211,7 +222,7 @@ export const semanticRenamePass: ASTPass = {
             const binding = path.scope.getBinding(oldName);
             if (!binding) continue;
             if (binding === scheduledBinding) {
-              if (path.scope.hasBinding(newName)) continue;
+              if (destinationUnavailable(binding, newName, annexBRetainedOwners)) continue;
               path.scope.rename(oldName, newName);
             }
           }
@@ -330,27 +341,44 @@ function getScopeKey(scope: any): string {
   return String(fnParent.node?.start ?? 0);
 }
 
+/** Check every exact binding site, including runtime Annex B owner bindings. */
+function destinationUnavailable(
+  binding: RenameBinding,
+  candidate: string,
+  annexBRetainedOwners?: Map<string, Set<object>>,
+): boolean {
+  const sites = new Set([binding.path, ...binding.referencePaths, ...binding.constantViolations]);
+  const owners = annexBRetainedOwners?.get(candidate);
+  for (const site of sites) {
+    if (site.scope.hasBinding(candidate)) return true;
+    if (!owners) continue;
+    for (let ancestor: BindingSite | null = site; ancestor; ancestor = ancestor.parentPath) {
+      if (owners.has(ancestor)) return true;
+    }
+  }
+  return false;
+}
+
 /** Try to assign a candidate name, checking both AST bindings and scheduled renames. */
 function tryAssignCandidate(
   path: any,
-  binding: object,
+  binding: RenameBinding,
   oldName: string,
   candidates: string[],
-  scopeRenames: Map<object, { oldName: string; newName: string }>,
+  scopeRenames: Map<RenameBinding, { oldName: string; newName: string }>,
   globalUsedNames: Set<string>,
   scopeScheduledNames: Map<string, Set<string>>,
   freeNames?: Set<string>,
-  annexBRetainedNames?: Set<string>,
+  annexBRetainedOwners?: Map<string, Set<object>>,
 ): boolean {
   const scopeKey = getScopeKey(path.scope);
   const scheduled = scopeScheduledNames.get(scopeKey) ?? new Set<string>();
 
   for (const candidate of candidates) {
     if (
-      path.scope.hasBinding(candidate)
+      destinationUnavailable(binding, candidate, annexBRetainedOwners)
       || scheduled.has(candidate)
       || freeNames?.has(candidate)
-      || annexBRetainedNames?.has(candidate)
     ) {
       continue;
     }
@@ -367,14 +395,14 @@ function tryAssignCandidate(
 /** Detect variables matching a usage predicate and rename them. */
 function detectUsagePattern(
   ast: File,
-  scopeRenames: Map<object, { oldName: string; newName: string }>,
+  scopeRenames: Map<RenameBinding, { oldName: string; newName: string }>,
   globalUsedNames: Set<string>,
   scopeScheduledNames: Map<string, Set<string>>,
   annexBLinked: Set<unknown>,
   predicate: (binding: any) => boolean,
   candidates: string[],
   freeNames?: Set<string>,
-  annexBRetainedNames?: Set<string>,
+  annexBRetainedOwners?: Map<string, Set<object>>,
 ): void {
   traverse(ast, {
     VariableDeclarator(path) {
@@ -388,7 +416,7 @@ function detectUsagePattern(
       if (scopeRenames.has(binding)) return;
 
       if (predicate(binding)) {
-        tryAssignCandidate(path, binding, name, candidates, scopeRenames, globalUsedNames, scopeScheduledNames, freeNames, annexBRetainedNames);
+        tryAssignCandidate(path, binding, name, candidates, scopeRenames, globalUsedNames, scopeScheduledNames, freeNames, annexBRetainedOwners);
       }
     },
   });
@@ -397,14 +425,14 @@ function detectUsagePattern(
 /** Detect variables matching an initializer predicate and rename them. */
 function detectInitPattern(
   ast: File,
-  scopeRenames: Map<object, { oldName: string; newName: string }>,
+  scopeRenames: Map<RenameBinding, { oldName: string; newName: string }>,
   globalUsedNames: Set<string>,
   scopeScheduledNames: Map<string, Set<string>>,
   annexBLinked: Set<unknown>,
   predicate: (binding: any) => boolean,
   candidates: string[],
   freeNames?: Set<string>,
-  annexBRetainedNames?: Set<string>,
+  annexBRetainedOwners?: Map<string, Set<object>>,
 ): void {
   traverse(ast, {
     VariableDeclarator(path) {
@@ -418,7 +446,7 @@ function detectInitPattern(
       if (scopeRenames.has(binding)) return;
 
       if (predicate(binding)) {
-        tryAssignCandidate(path, binding, name, candidates, scopeRenames, globalUsedNames, scopeScheduledNames, freeNames, annexBRetainedNames);
+        tryAssignCandidate(path, binding, name, candidates, scopeRenames, globalUsedNames, scopeScheduledNames, freeNames, annexBRetainedOwners);
       }
     },
   });
@@ -427,12 +455,12 @@ function detectInitPattern(
 /** Detect addEventListener event parameter pattern. */
 function detectEventParam(
   ast: File,
-  scopeRenames: Map<object, { oldName: string; newName: string }>,
+  scopeRenames: Map<RenameBinding, { oldName: string; newName: string }>,
   globalUsedNames: Set<string>,
   scopeScheduledNames: Map<string, Set<string>>,
   annexBLinked: Set<unknown>,
   freeNames?: Set<string>,
-  annexBRetainedNames?: Set<string>,
+  annexBRetainedOwners?: Map<string, Set<object>>,
 ): void {
   traverse(ast, {
     CallExpression(path) {
@@ -458,7 +486,7 @@ function detectEventParam(
       if (annexBLinked.has(binding)) return;
       if (scopeRenames.has(binding)) return;
 
-      tryAssignCandidate(handlerPath, binding, param.name, ["event", "evt"], scopeRenames, globalUsedNames, scopeScheduledNames, freeNames, annexBRetainedNames);
+      tryAssignCandidate(handlerPath, binding, param.name, ["event", "evt"], scopeRenames, globalUsedNames, scopeScheduledNames, freeNames, annexBRetainedOwners);
     },
   });
 }

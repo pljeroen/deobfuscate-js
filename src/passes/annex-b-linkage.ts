@@ -29,9 +29,9 @@ export function annexBLinkedBindings(ast: File): Set<unknown> {
   return linked;
 }
 
-/** Spellings of retained Annex B block functions, including declarations without an owner binding. */
-export function annexBRetainedFunctionNames(ast: File): Set<string> {
-  const names = new Set<string>();
+/** Exact owners of retained Annex B block functions, including implicit owner bindings. */
+export function annexBRetainedFunctionOwners(ast: File): Map<string, Set<object>> {
+  const owners = new Map<string, Set<object>>();
   traverse(ast, {
     FunctionDeclaration(path: any) {
       const { node, parentPath } = path;
@@ -43,9 +43,10 @@ export function annexBRetainedFunctionNames(ast: File): Set<string> {
         || (parentPath.isBlockStatement() && (!owner.isFunction() || parentPath.node !== owner.node.body));
       if (!belowAnnexBBoundary) return;
 
-      names.add(node.id.name);
+      if (!owners.has(node.id.name)) owners.set(node.id.name, new Set());
+      owners.get(node.id.name)!.add(owner);
     },
   });
 
-  return names;
+  return owners;
 }
