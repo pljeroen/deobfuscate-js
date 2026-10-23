@@ -250,6 +250,254 @@ function runCli(source: string, unsafe: boolean): {
   }
 }
 
+type FingerprintState = "inactive" | "active";
+
+type ClassOracleTemplate = {
+  id: string;
+  classification: "qualifying" | "boundedness" | "guard-only";
+  source: string;
+  observedGlobals: string[];
+  astRenameOuterNames?: string[];
+  finalSelectedFunctionCounts?: Record<FingerprintState, number>;
+  finalProgramBlockFunctionCounts?: Record<FingerprintState, number>;
+};
+
+const ACTIVE_FINGERPRINT_SUFFIX =
+  " var _0xp1 = 1; var _0xp2 = 2; var _0xp3 = 3; globalThis.__cx02Fingerprint = _0xp1 + _0xp2 + _0xp3;";
+
+function withFingerprint(source: string, fingerprint: FingerprintState): string {
+  return fingerprint === "active" ? `${source}${ACTIVE_FINGERPRINT_SUFFIX}` : source;
+}
+
+function selectedDeclaration(name: string, sentinel: number, arm: "truthy" | "falsy" | "dci"): string {
+  const declaration = `function ${name}() { return ${sentinel}; }`;
+  if (arm === "truthy") return `if (true) { ${declaration} }`;
+  if (arm === "falsy") return `if (false) { globalThis.dead = ${sentinel}; } else { ${declaration} }`;
+  return `if ("cx02" === "cx02") { ${declaration} } else { globalThis.dead = ${sentinel}; }`;
+}
+
+const classOracleTemplates: ClassOracleTemplate[] = [
+  {
+    id: "Q01",
+    classification: "qualifying",
+    source: `function outer() { ${selectedDeclaration("_0xf", 301, "truthy")} return _0xf(); } globalThis.answer = outer();`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "Q02",
+    classification: "qualifying",
+    source: `function outer() { ${selectedDeclaration("_0xf", 302, "dci")} return _0xf(); } globalThis.answer = outer();`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "Q03",
+    classification: "qualifying",
+    source: `var invoke = function _0xf() { ${selectedDeclaration("_0xf", 303, "truthy")} return _0xf(); }; globalThis.answer = invoke();`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "Q04",
+    classification: "qualifying",
+    source: `function outer() { var _0xf; function inner() { ${selectedDeclaration("_0xf", 304, "falsy")} return _0xf(); } return inner(); } globalThis.answer = outer();`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "Q05",
+    classification: "qualifying",
+    source: `function outer() { let _0xf; var inner = function () { ${selectedDeclaration("_0xf", 305, "dci")} return _0xf(); }; return inner(); } globalThis.answer = outer();`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "Q06",
+    classification: "qualifying",
+    source: `function outer() { class _0xf {} var inner = () => { ${selectedDeclaration("_0xf", 306, "truthy")} return _0xf(); }; return inner(); } globalThis.answer = outer();`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "Q07",
+    classification: "qualifying",
+    source: `function outer(_0xf) { var holder = { method() { ${selectedDeclaration("_0xf", 307, "falsy")} return _0xf(); } }; return holder.method(); } globalThis.answer = outer(0);`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "Q08",
+    classification: "qualifying",
+    source: `function outer() { function _0xf() { return 0; } function inner() { ${selectedDeclaration("_0xf", 308, "dci")} return _0xf(); } return inner(); } globalThis.answer = outer();`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "Q09",
+    classification: "qualifying",
+    source: `function outer() { function _0xf(reentered) { if (reentered) return -1; ${selectedDeclaration("_0xf", 309, "truthy")} return _0xf(1); } return _0xf(0); } globalThis.answer = outer();`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "Q10",
+    classification: "qualifying",
+    source: `var invoke = function _0xf(reentered) { if (reentered) return -1; var inner = function () { ${selectedDeclaration("_0xf", 310, "falsy")} return _0xf(1); }; return inner(); }; globalThis.answer = invoke(0);`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "Q11",
+    classification: "qualifying",
+    source: `function outer() { var _0xf; function middle() { var holder = { method() { ${selectedDeclaration("_0xf", 311, "dci")} return _0xf(); } }; return holder.method(); } return middle(); } globalThis.answer = outer();`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "Q12",
+    classification: "qualifying",
+    source: `function outer() { var _0xf; var first = () => { var holder = { method() { var inner = function () { ${selectedDeclaration("_0xf", 312, "truthy")} return _0xf(); }; return inner(); } }; return holder.method(); }; return first(); } globalThis.answer = outer();`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "Q13",
+    classification: "qualifying",
+    source: `${selectedDeclaration("_0xf", 313, "falsy")} globalThis.answer = _0xf();`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "Q14",
+    classification: "qualifying",
+    source: `function outer() { var _0xf = 0; function inner() { var _0xf; ${selectedDeclaration("_0xf", 314, "truthy")} return _0xf(); } return inner(); } globalThis.answer = outer();`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "Q15",
+    classification: "qualifying",
+    source: `function outer() { let _0xf = 0; var middle = () => { var inner = () => { var _0xf; ${selectedDeclaration("_0xf", 315, "falsy")} return _0xf(); }; return inner(); }; return middle(); } globalThis.answer = outer();`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "Q16",
+    classification: "qualifying",
+    source: `function outer() { const _0xf = 0; var first = { method() { var second = { method() { var third = { method() { var _0xf; ${selectedDeclaration("_0xf", 316, "dci")} return _0xf(); } }; return third.method(); } }; return second.method(); } }; return first.method(); } globalThis.answer = outer();`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "Q17",
+    classification: "qualifying",
+    source: `function outer() { var a; ${selectedDeclaration("a", 300, "truthy")} var _0xf; ${selectedDeclaration("_0xf", 17, "truthy")} return a() + _0xf(); } globalThis.answer = outer();`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "C01",
+    classification: "boundedness",
+    source: `function outer() { "use strict"; ${selectedDeclaration("_0xf", 401, "truthy")} return typeof _0xf; } globalThis.answer = outer();`,
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "C02",
+    classification: "boundedness",
+    source: "function outer() { if (true) { async function _0xf() { return 402; } } return typeof _0xf; } globalThis.answer = outer();",
+    observedGlobals: ["answer"],
+    finalSelectedFunctionCounts: { inactive: 1, active: 0 },
+  },
+  {
+    id: "C03",
+    classification: "boundedness",
+    source: "function outer() { if (true) { function* _0xf() { yield 403; } } return typeof _0xf; } globalThis.answer = outer();",
+    observedGlobals: ["answer"],
+    finalSelectedFunctionCounts: { inactive: 1, active: 0 },
+  },
+  {
+    id: "C04",
+    classification: "boundedness",
+    source: "function outer() { function _0xf() { return 404; } return 4; } globalThis.answer = outer();",
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "C05",
+    classification: "boundedness",
+    source: "function outer(a) { if (true) { function a() { return 405; } } return typeof a; } globalThis.answer = outer(1);",
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "C06",
+    classification: "boundedness",
+    source: "function outer() { let a; if (true) { function a() { return 406; } } return typeof a; } globalThis.answer = outer();",
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "C07",
+    classification: "boundedness",
+    source: "function outer() { const a = 7; if (true) { function a() { return 407; } } return a; } globalThis.answer = outer();",
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "C08",
+    classification: "boundedness",
+    source: "function outer() { var a = 8; function inner(a) { if (true) { function a() { return 408; } } return 2; } return a + inner(2); } globalThis.answer = outer();",
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "C09",
+    classification: "boundedness",
+    source: "function outer() { var descriptiveBinding; if (true) { function descriptiveBinding() { return 409; } } return descriptiveBinding(); } globalThis.answer = outer();",
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "C10",
+    classification: "boundedness",
+    source: `function outer() { var _0xf; var _0xa = 5; ${selectedDeclaration("_0xf", 410, "truthy")} return _0xa; } globalThis.answer = outer();`,
+    observedGlobals: ["answer"],
+    astRenameOuterNames: ["_0xf", "other"],
+  },
+  {
+    id: "C11",
+    classification: "boundedness",
+    source: "export {}; if (true) { function _0xf() { return 411; } } globalThis.answer = 'module';",
+    observedGlobals: ["answer"],
+    finalProgramBlockFunctionCounts: { inactive: 1, active: 0 },
+  },
+  {
+    id: "G01",
+    classification: "guard-only",
+    source: "function outer() { var _0xf; { function _0xf() { return 501; } } return _0xf(); } globalThis.answer = outer();",
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "G02",
+    classification: "guard-only",
+    source: "function outer() { var _0xf; switch (1) { case 1: function _0xf() { return 502; } } return _0xf(); } globalThis.answer = outer();",
+    observedGlobals: ["answer"],
+  },
+];
+
+const classOracleRows = classOracleTemplates.flatMap((template) =>
+  (["inactive", "active"] as const).map((fingerprint) => ({ ...template, fingerprint })),
+);
+
+const safeASTPasses = filterSafePasses(allASTPasses);
+
+function productionPrefixExecutions(
+  source: string,
+  observedGlobals: string[],
+): { safe: Execution[]; all: Execution[]; warnings: string[] } {
+  const executePrefixes = (passes: typeof allASTPasses): { executions: Execution[]; warnings: string[] } => {
+    const executions: Execution[] = [];
+    const warnings: string[] = [];
+    for (let length = 1; length <= passes.length; length += 1) {
+      const result = runPipelineWithReport(source, passes.slice(0, length), [formatPass]);
+      executions.push(executeFresh(result.code, observedGlobals));
+      warnings.push(...result.warnings);
+    }
+    return { executions, warnings };
+  };
+  const safe = executePrefixes(safeASTPasses);
+  const all = executePrefixes(allASTPasses);
+  return { safe: safe.executions, all: all.executions, warnings: [...safe.warnings, ...all.warnings] };
+}
+
+const classOracleCliCases = [
+  { id: "S1-active", fingerprint: "active" as const, source: classOracleTemplates[0].source, observedGlobals: ["answer"] },
+  { id: "DCI-active", fingerprint: "active" as const, source: classOracleTemplates[1].source, observedGlobals: ["answer"] },
+  { id: "BR2-active", fingerprint: "active" as const, source: classOracleTemplates[3].source, observedGlobals: ["answer"] },
+  { id: "BR2-inactive", fingerprint: "inactive" as const, source: classOracleTemplates[3].source, observedGlobals: ["answer"] },
+].flatMap((testCase) => [
+  { ...testCase, mode: "default", unsafe: false },
+  { ...testCase, mode: "--unsafe", unsafe: true },
+]);
+
 describe("CX-02 selected dead-code branch scope preservation", () => {
   const classCases = [
     {
@@ -663,4 +911,58 @@ describe("CX-02 selected dead-code branch scope preservation", () => {
     expect(executeFresh(direct, ["answer"])).toEqual(expected);
     expect(executeFresh(pipeline.code, ["answer"])).toEqual(expected);
   });
+
+  it.each(classOracleRows)(
+    "class oracle $id $fingerprint ($classification)",
+    ({ source: templateSource, observedGlobals, fingerprint, astRenameOuterNames, finalSelectedFunctionCounts, finalProgramBlockFunctionCounts }) => {
+      const source = withFingerprint(templateSource, fingerprint);
+      const expected = executeFresh(source, observedGlobals);
+      const prefixes = productionPrefixExecutions(source, observedGlobals);
+
+      expect(prefixes.warnings).toEqual([]);
+      expect(prefixes.safe).toEqual(safeASTPasses.map(() => expected));
+      expect(prefixes.all).toEqual(allASTPasses.map(() => expected));
+      if (astRenameOuterNames) {
+        expect(directVariableNames(astRenameCode(source))).toEqual(astRenameOuterNames);
+      }
+      if (finalSelectedFunctionCounts) {
+        for (const passes of [safeASTPasses, allASTPasses]) {
+          const result = runPipelineWithReport(source, passes, [formatPass]);
+          expect(selectedNestedBlockFunctionDeclarationCount(result.code)).toBe(
+            finalSelectedFunctionCounts[fingerprint],
+          );
+        }
+      }
+      if (finalProgramBlockFunctionCounts) {
+        for (const passes of [safeASTPasses, allASTPasses]) {
+          const result = runPipelineWithReport(source, passes, [formatPass]);
+          const block = parse(result.code).program.body.find((statement) => t.isBlockStatement(statement));
+          const count = t.isBlockStatement(block)
+            ? block.body.filter((statement) => t.isFunctionDeclaration(statement)).length
+            : 0;
+          expect(count).toBe(finalProgramBlockFunctionCounts[fingerprint]);
+        }
+      }
+    },
+    120_000,
+  );
+
+  it.each(classOracleCliCases)(
+    "class oracle real CLI $mode $id",
+    ({ source: templateSource, observedGlobals, fingerprint, unsafe }) => {
+      const source = withFingerprint(templateSource, fingerprint);
+      const expected = executeFresh(source, observedGlobals);
+      const result = runCli(source, unsafe);
+      const warningsAndErrors = result.stderrLines.filter((line) => /^(WARNING|ERROR):/.test(line));
+
+      expect(expected.completion).toBe("normal");
+      expect(result.signal).toBeNull();
+      expect(result.status, result.stderrLines.join("\n")).toBe(0);
+      expect(warningsAndErrors).toEqual(unsafe ? [UNSAFE_NOTICE] : []);
+      expect(result.stdoutLines.filter((line) => line.startsWith("Done: "))).toHaveLength(1);
+      expect(result.output).toBeDefined();
+      expect(executeFresh(result.output ?? "", observedGlobals)).toEqual(expected);
+    },
+    120_000,
+  );
 });

@@ -167,6 +167,10 @@ export const antiDebugPass: ASTPass = {
         FunctionDeclaration(path) {
           if (!path.node.id || !t.isIdentifier(path.node.id)) return;
           if (!isObfuscatedName(path.node.id.name)) return;
+          const parent = path.parentPath;
+          const isFunctionBody = parent.isBlockStatement() && parent.parentPath?.isFunction() && parent.key === "body";
+          if (!path.node.async && !path.node.generator && !path.isInStrictMode() &&
+              (parent.isSwitchCase() || (parent.isBlockStatement() && !isFunctionBody))) return;
           path.scope.crawl();
           const binding = path.scope.getBinding(path.node.id.name);
           if (!binding) return;
