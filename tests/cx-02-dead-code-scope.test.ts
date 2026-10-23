@@ -7,7 +7,7 @@ import vm from "node:vm";
 import { describe, expect, it } from "vitest";
 import { t, traverse } from "../src/babel.js";
 import { allASTPasses } from "../src/cli-shared.js";
-import { generate, parse } from "../src/parser.js";
+import { generate, parse, parseWithDiagnostics } from "../src/parser.js";
 import { deadCodeEliminatePass } from "../src/passes/dead-code-eliminate.js";
 import { formatPass } from "../src/passes/format.js";
 import { astRenamePass } from "../src/passes/ast-rename.js";
@@ -751,6 +751,7 @@ type NormalizedValue = null | boolean | number | string | NormalizedValue[] | { 
 type RuntimeOutcome = {
   completion: "normal" | "throw";
   errorConstructor: string | null;
+  errorMessage: string | null;
   globals: Record<string, NormalizedValue>;
 };
 
@@ -779,13 +780,13 @@ function executeNormalized(source: string, observed: readonly string[]): Runtime
     Object.fromEntries(observed.map((name) => [name, normalizedValue(Reflect.get(context, name))]));
   try {
     vm.runInContext(source, context, { timeout: 2_000 });
-    return { completion: "normal", errorConstructor: null, globals: globals() };
+    return { completion: "normal", errorConstructor: null, errorMessage: null, globals: globals() };
   } catch (error: unknown) {
     const errorConstructor =
       typeof error === "object" && error !== null && "constructor" in error
         ? String((error as { constructor?: { name?: unknown } }).constructor?.name ?? typeof error)
         : typeof error;
-    return { completion: "throw", errorConstructor, globals: globals() };
+    return { completion: "throw", errorConstructor, errorMessage: typeof error === "object" && error !== null && "message" in error ? String(error.message) : String(error), globals: globals() };
   }
 }
 
@@ -802,155 +803,197 @@ function safeAndAll(
   });
 }
 
-type PropertyPlacement = "BlockStatement" | "SwitchCase";
-function propertyFunction(name: string, placement: PropertyPlacement, value: number): string {
-  const declaration = "function " + name + "() { return " + value + "; }";
-  return placement === "BlockStatement"
-    ? "if (true) { " + declaration + " }"
-    : "switch (1) { case 1: " + declaration + " }";
+const coveringAxes = {
+  declaration: ["class", "strict_ordinary_function", "async_function", "generator_function", "async_generator_function", "sloppy_ordinary_annex_b", "used_let_base_wrong", "used_const_base_wrong"],
+  site: ["in_block_before", "in_block_after", "after_block"],
+  placement: ["if_true", "if_false_alternate", "dead_code_injection", "switch_case", "bare_block", "non_constant_if"],
+  trigger: ["array_method", "regex", "arithmetic_majority", "length", "json_parse", "error_parameter", "event_parameter"],
+  owner: ["Program", "function", "nested_function"],
+  fingerprint: ["inactive", "active"],
+  passList: ["safe", "all"],
+} as const;
+type CoveringAxis = keyof typeof coveringAxes;
+type CoveringTuple = Record<CoveringAxis, string>;
+const axisNames = Object.keys(coveringAxes).sort() as CoveringAxis[];
+function tupleId(row: CoveringTuple): string {
+  return axisNames.map((axis) => axis + "=" + row[axis]).join("|");
 }
-
-type DestinationSpec = {
-  id: string;
-  destination: string;
-  kind: "declaration" | "error" | "event";
-  declaration?: (name: string) => string;
-  observation: (name: string) => string;
-};
-const destinationSpecs: DestinationSpec[] = [
-  { id: "array", destination: "arr", kind: "declaration",
-    declaration: (n) => "var " + n + " = []; " + n + ".push(7);",
-    observation: (n) => "typeof " + n + " + ':' + " + n + ".length" },
-  { id: "regex", destination: "pattern", kind: "declaration",
-    declaration: (n) => "var " + n + " = /a/;",
-    observation: (n) => "typeof " + n + " + ':' + " + n + ".test('a')" },
-  { id: "arithmetic", destination: "num", kind: "declaration",
-    declaration: (n) => "var " + n + " = 2; " + n + " = " + n + " * 3;",
-    observation: (n) => "typeof " + n + " + ':' + (" + n + " + 1)" },
-  { id: "length", destination: "len", kind: "declaration",
-    declaration: (n) => "var " + n + " = String(12345).length;",
-    observation: (n) => "typeof " + n + " + ':' + " + n },
-  { id: "json", destination: "data", kind: "declaration",
-    declaration: (n) => "var " + n + " = JSON.parse('[1,2]');",
-    observation: (n) => "typeof " + n + " + ':' + " + n + ".length" },
-  { id: "error-first", destination: "err", kind: "error",
-    observation: (n) => "typeof " + n + " + ':' + (" + n + " === null)" },
-  { id: "event", destination: "event", kind: "event",
-    observation: (n) => "typeof " + n + " + ':' + " + n + ".type" },
-];
-type DestinationOwner = "Program" | "nested";
-type DestinationTuple = {
-  spec: DestinationSpec;
-  owner: DestinationOwner;
-  placement: PropertyPlacement;
-  fingerprint: FingerprintState;
-};
-const destinationTuples: DestinationTuple[] = destinationSpecs.flatMap((spec) =>
-  (["Program", "nested"] as const).flatMap((owner) =>
-    (["BlockStatement", "SwitchCase"] as const).flatMap((placement) =>
-      (["inactive", "active"] as const).map((fingerprint) => ({ spec, owner, placement, fingerprint })),
-    ),
-  ),
-);
-const rejectedDestinationTuples = destinationTuples.filter(
-  ({ spec, owner }) => spec.kind !== "declaration" && owner === "Program",
-);
-function destinationProgram(tuple: DestinationTuple, index: number): string {
-  const n = "_0xv";
-  const selected = propertyFunction(tuple.spec.destination, tuple.placement, 900 + index);
-  const observation = tuple.spec.observation(n);
-  let source: string;
-  if (tuple.spec.kind === "declaration" && tuple.owner === "Program") {
-    source = (tuple.spec.declaration?.(n) ?? "") + " " + selected +
-      " globalThis.answer = JSON.stringify(" + observation + ");";
-  } else if (tuple.spec.kind === "declaration") {
-    source = "function outer() { " + (tuple.spec.declaration?.(n) ?? "") +
-      " function inner() { " + selected + " return " + observation +
-      "; } return inner(); } globalThis.answer = JSON.stringify(outer());";
-  } else if (tuple.spec.kind === "error") {
-    source = "function outer(" + n + ", callback) { if (" + n + ") return 'handled'; " +
-      "function inner() { " + selected + " return " + observation +
-      "; } return inner(); } globalThis.answer = JSON.stringify(outer(null, function () {}));";
-  } else {
-    source = "var target = { addEventListener: function (type, handler) { return handler({ type: type }); } };" +
-      " globalThis.answer = JSON.stringify(target.addEventListener('tick', function (" + n +
-      ") { function inner() { " + selected + " return " + observation +
-      "; } return inner(); }));";
+function obligations(row: CoveringTuple): string[] {
+  const values = axisNames.map((axis) => axis + "=" + row[axis]);
+  return values.concat(values.flatMap((left, i) => values.slice(i + 1).map((right) => left + "&" + right)));
+}
+function coveringInventory(): { valid: CoveringTuple[]; rejected: CoveringTuple[] } {
+  let rows: Partial<CoveringTuple>[] = [{}];
+  for (const axis of axisNames) {
+    rows = rows.flatMap((row) => [...coveringAxes[axis]].sort().map((value) => ({ ...row, [axis]: value })));
   }
-  return withFingerprint(source, tuple.fingerprint);
+  const valid: CoveringTuple[] = [];
+  const rejected: CoveringTuple[] = [];
+  for (const partial of rows) {
+    const row = partial as CoveringTuple;
+    (row.owner === "Program" && ["error_parameter", "event_parameter"].includes(row.trigger) ? rejected : valid).push(row);
+  }
+  return { valid, rejected };
 }
-const destinationRows = destinationTuples
-  .filter(({ spec, owner }) => spec.kind === "declaration" || owner === "nested")
-  .map((tuple, index) => ({
-    ...tuple,
-    id: ["destination", tuple.spec.id, tuple.owner, tuple.placement, tuple.fingerprint].join("|"),
-    source: destinationProgram(tuple, index),
-    baseCorrect: !(tuple.owner === "Program" && tuple.placement === "SwitchCase"),
-  }));
-
-type CloneSpec = {
-  id: string;
-  destination: string;
-  declaration: (name: string) => string;
-  observation: (name: string) => string;
+function selectCoveringRows(): { rows: CoveringTuple[]; teeth: Record<string, string>; universe: string[]; removed: string[] } {
+  const { valid } = coveringInventory();
+  const universe = new Set(valid.flatMap(obligations));
+  const uncovered = new Set(universe);
+  const selected: CoveringTuple[] = [];
+  // Maximum uncovered coverage; ties follow the stable lexical tuple inventory.
+  while (uncovered.size > 0) {
+    let best: CoveringTuple | undefined;
+    let score = 0;
+    for (const row of valid) {
+      const count = obligations(row).filter((item) => uncovered.has(item)).length;
+      if (count > score) { best = row; score = count; }
+    }
+    if (!best) throw new Error("Uncovered obligation has no valid tuple");
+    selected.push(best);
+    obligations(best).forEach((item) => uncovered.delete(item));
+  }
+  selected.sort((a, b) => tupleId(a) < tupleId(b) ? -1 : tupleId(a) > tupleId(b) ? 1 : 0);
+  const counts = new Map<string, number>();
+  selected.forEach((row) => obligations(row).forEach((item) => counts.set(item, (counts.get(item) ?? 0) + 1)));
+  const removed: string[] = [];
+  for (let i = selected.length - 1; i >= 0; i -= 1) {
+    const covers = obligations(selected[i]);
+    if (covers.every((item) => (counts.get(item) ?? 0) > 1)) {
+      removed.push(tupleId(selected[i]));
+      covers.forEach((item) => counts.set(item, (counts.get(item) ?? 0) - 1));
+      selected.splice(i, 1);
+    }
+  }
+  const teeth = Object.fromEntries(selected.map((row) => [tupleId(row), obligations(row).find((item) => counts.get(item) === 1) ?? ""]));
+  return { rows: selected, teeth, universe: [...universe].sort(), removed };
+}
+const covering = selectCoveringRows();
+const triggerSpecs: Record<string, { destination: string; init: string; use: string }> = {
+  array_method: { destination: "arr", init: "var _0xv=[]; _0xv.push(1);", use: "_0xv.length" },
+  regex: { destination: "pattern", init: "var _0xv=/a/;", use: "_0xv.test('a')" },
+  arithmetic_majority: { destination: "num", init: "var _0xv=2; _0xv=_0xv*3;", use: "(_0xv+1)+(_0xv*2)" },
+  length: { destination: "len", init: "var _0xv=String(12345).length;", use: "_0xv" },
+  json_parse: { destination: "data", init: "var _0xv=JSON.parse('[1,2]');", use: "_0xv.length" },
+  error_parameter: { destination: "err", init: "if(_0xv) return 'handled';", use: "_0xv===null" },
+  event_parameter: { destination: "event", init: "", use: "_0xv.type" },
 };
-const cloneSpecs: CloneSpec[] = [
-  { id: "array", destination: "arr", declaration: (n) => "var " + n + " = []; " + n + ".push(7);", observation: (n) => n + ".length" },
-  { id: "regex", destination: "pattern", declaration: (n) => "var " + n + " = /a/;", observation: (n) => n + ".test('a')" },
-  { id: "arithmetic", destination: "num", declaration: (n) => "var " + n + " = 2; " + n + " = " + n + " * 3;", observation: (n) => "(" + n + " + 1)" },
-  { id: "length", destination: "len", declaration: (n) => "var " + n + " = String(12345).length;", observation: (n) => n },
-  { id: "json", destination: "data", declaration: (n) => "var " + n + " = JSON.parse('[1,2]');", observation: (n) => n + ".length" },
-  { id: "counter", destination: "i", declaration: (n) => "for (var " + n + " = 0; " + n + " < 3; " + n + "++) {}", observation: (n) => n },
+function coveringProgram(row: CoveringTuple): string {
+  const spec = triggerSpecs[row.trigger];
+  const n = spec.destination;
+  const declarations: Record<string, string> = {
+    class: "class " + n + " {}",
+    strict_ordinary_function: "function " + n + "() {}",
+    async_function: "async function " + n + "() {}",
+    generator_function: "function* " + n + "() {}",
+    async_generator_function: "async function* " + n + "() {}",
+    sloppy_ordinary_annex_b: "function " + n + "() {}",
+    used_let_base_wrong: "let " + n + "=globalThis.seed||7;globalThis.local=" + n + ";",
+    used_const_base_wrong: "const " + n + "=globalThis.seed||7;globalThis.local=" + n + ";",
+  };
+  const read = "globalThis.answer=" + spec.use + ";";
+  const body = (row.site === "in_block_before" ? read : "") + declarations[row.declaration] +
+    (row.site === "in_block_after" ? read : "");
+  const placements: Record<string, string> = {
+    if_true: "if(true){" + body + "}",
+    if_false_alternate: "if(false){globalThis.dead=1;}else{" + body + "}",
+    dead_code_injection: "if('a'==='a'){" + body + "}else{globalThis.dead=1;}",
+    switch_case: "switch(1){case 1:" + body + "break;}",
+    bare_block: "{" + body + "}",
+    non_constant_if: "if(globalThis.flag===undefined){" + body + "}",
+  };
+  const core = spec.init + placements[row.placement] + (row.site === "after_block" ? read : "");
+  let source: string;
+  if (row.trigger === "error_parameter") {
+    source = "function own(_0xv,callback){" + core + "}own(null,function(){});";
+  } else if (row.trigger === "event_parameter") {
+    source = "var target={addEventListener:function(type,handler){return handler({type:type});}};target.addEventListener('tick',function(_0xv){" + core + "});";
+  } else source = row.owner === "Program" ? core : "function own(){" + core + "}own();";
+  if (row.owner === "nested_function") source = "function outer(){" + source + "}outer();";
+  if (row.declaration === "strict_ordinary_function") source = '"use strict";' + source;
+  return withFingerprint(source, row.fingerprint as FingerprintState);
+}
+// Structural types keep the oracle on the installed Babel objects without requiring external declarations.
+type SitePath = { node: t.Node; scope: { hasBinding(name: string): boolean }; parentPath: SitePath | null };
+type ExactBinding = { path: SitePath; referencePaths: SitePath[]; constantViolations: SitePath[]; identifier: { name: string } };
+function exactSites(binding: ExactBinding): SitePath[] {
+  return [...new Set([binding.path, ...binding.referencePaths, ...binding.constantViolations])];
+}
+function getProbeBinding(ast: t.File): ExactBinding {
+  let found: ExactBinding | undefined;
+  traverse(ast, { Scope(path: { scope: { getOwnBinding(name: string): unknown } }) {
+    const binding = path.scope.getOwnBinding("_0xv") as ExactBinding | undefined;
+    if (binding) found = binding;
+  } });
+  if (!found) throw new Error("Fixture has no exact _0xv Binding");
+  return found;
+}
+const baseCoveringOutcomes: Array<{ id: string; outcome: RuntimeOutcome }> = [
+  {"id": "declaration=async_function|fingerprint=active|owner=Program|passList=all|placement=bare_block|site=after_block|trigger=arithmetic_majority", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 19, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=async_function|fingerprint=active|owner=Program|passList=all|placement=bare_block|site=after_block|trigger=length", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 5, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=async_function|fingerprint=active|owner=Program|passList=all|placement=non_constant_if|site=after_block|trigger=json_parse", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 2, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=async_function|fingerprint=active|owner=function|passList=all|placement=dead_code_injection|site=after_block|trigger=event_parameter", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": "tick", "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=async_function|fingerprint=active|owner=function|passList=all|placement=switch_case|site=after_block|trigger=error_parameter", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": true, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=async_function|fingerprint=active|owner=nested_function|passList=safe|placement=if_true|site=in_block_after|trigger=array_method", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 1, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=async_function|fingerprint=inactive|owner=function|passList=all|placement=if_false_alternate|site=in_block_before|trigger=regex", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": true, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": "<undefined>"}}},
+  {"id": "declaration=async_generator_function|fingerprint=active|owner=Program|passList=all|placement=bare_block|site=after_block|trigger=json_parse", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 2, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=async_generator_function|fingerprint=active|owner=Program|passList=all|placement=bare_block|site=after_block|trigger=regex", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": true, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=async_generator_function|fingerprint=active|owner=Program|passList=all|placement=if_false_alternate|site=after_block|trigger=length", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 5, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=async_generator_function|fingerprint=active|owner=Program|passList=all|placement=if_true|site=after_block|trigger=arithmetic_majority", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 19, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=async_generator_function|fingerprint=active|owner=function|passList=all|placement=non_constant_if|site=after_block|trigger=error_parameter", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": true, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=async_generator_function|fingerprint=active|owner=nested_function|passList=safe|placement=switch_case|site=in_block_before|trigger=event_parameter", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": "tick", "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=async_generator_function|fingerprint=inactive|owner=function|passList=safe|placement=dead_code_injection|site=in_block_after|trigger=array_method", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 1, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": "<undefined>"}}},
+  {"id": "declaration=class|fingerprint=active|owner=Program|passList=all|placement=bare_block|site=after_block|trigger=arithmetic_majority", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 19, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=class|fingerprint=active|owner=Program|passList=all|placement=dead_code_injection|site=after_block|trigger=array_method", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 1, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=class|fingerprint=active|owner=Program|passList=all|placement=dead_code_injection|site=after_block|trigger=regex", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": true, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=class|fingerprint=active|owner=Program|passList=all|placement=if_true|site=after_block|trigger=length", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 5, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=class|fingerprint=active|owner=function|passList=all|placement=non_constant_if|site=after_block|trigger=event_parameter", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": "tick", "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=class|fingerprint=active|owner=nested_function|passList=safe|placement=if_false_alternate|site=in_block_before|trigger=error_parameter", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": true, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=class|fingerprint=inactive|owner=function|passList=all|placement=switch_case|site=in_block_after|trigger=json_parse", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 0, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": "<undefined>"}}},
+  {"id": "declaration=generator_function|fingerprint=active|owner=Program|passList=all|placement=dead_code_injection|site=after_block|trigger=arithmetic_majority", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 19, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=generator_function|fingerprint=active|owner=Program|passList=all|placement=if_false_alternate|site=after_block|trigger=array_method", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 1, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=generator_function|fingerprint=active|owner=function|passList=all|placement=bare_block|site=after_block|trigger=event_parameter", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": "tick", "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=generator_function|fingerprint=active|owner=function|passList=all|placement=switch_case|site=after_block|trigger=error_parameter", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": true, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=generator_function|fingerprint=active|owner=function|passList=safe|placement=bare_block|site=in_block_after|trigger=length", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 5, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=generator_function|fingerprint=active|owner=nested_function|passList=all|placement=non_constant_if|site=after_block|trigger=regex", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": true, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=generator_function|fingerprint=inactive|owner=Program|passList=all|placement=if_true|site=in_block_before|trigger=json_parse", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 2, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": "<undefined>"}}},
+  {"id": "declaration=sloppy_ordinary_annex_b|fingerprint=active|owner=Program|passList=all|placement=dead_code_injection|site=in_block_before|trigger=length", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 5, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=sloppy_ordinary_annex_b|fingerprint=active|owner=Program|passList=all|placement=if_true|site=after_block|trigger=regex", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": true, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=sloppy_ordinary_annex_b|fingerprint=active|owner=Program|passList=all|placement=switch_case|site=after_block|trigger=array_method", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 0, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=sloppy_ordinary_annex_b|fingerprint=active|owner=function|passList=all|placement=if_false_alternate|site=after_block|trigger=error_parameter", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": true, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=sloppy_ordinary_annex_b|fingerprint=active|owner=function|passList=all|placement=non_constant_if|site=in_block_after|trigger=event_parameter", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": "tick", "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=sloppy_ordinary_annex_b|fingerprint=active|owner=nested_function|passList=all|placement=bare_block|site=after_block|trigger=json_parse", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 2, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=sloppy_ordinary_annex_b|fingerprint=inactive|owner=nested_function|passList=safe|placement=non_constant_if|site=in_block_before|trigger=arithmetic_majority", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 19, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": "<undefined>"}}},
+  {"id": "declaration=strict_ordinary_function|fingerprint=active|owner=Program|passList=all|placement=bare_block|site=after_block|trigger=regex", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": true, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=strict_ordinary_function|fingerprint=active|owner=Program|passList=all|placement=dead_code_injection|site=after_block|trigger=json_parse", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 2, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=strict_ordinary_function|fingerprint=active|owner=Program|passList=all|placement=non_constant_if|site=in_block_before|trigger=array_method", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 0, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=strict_ordinary_function|fingerprint=active|owner=function|passList=all|placement=bare_block|site=after_block|trigger=error_parameter", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": true, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=strict_ordinary_function|fingerprint=active|owner=function|passList=all|placement=if_true|site=after_block|trigger=event_parameter", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": "tick", "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=strict_ordinary_function|fingerprint=active|owner=function|passList=safe|placement=if_false_alternate|site=in_block_after|trigger=arithmetic_majority", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 19, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=strict_ordinary_function|fingerprint=inactive|owner=nested_function|passList=all|placement=switch_case|site=after_block|trigger=length", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 5, "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": "<undefined>"}}},
+  {"id": "declaration=used_const_base_wrong|fingerprint=active|owner=Program|passList=all|placement=bare_block|site=after_block|trigger=array_method", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 1, "local": 7, "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=used_const_base_wrong|fingerprint=active|owner=Program|passList=all|placement=dead_code_injection|site=after_block|trigger=arithmetic_majority", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 19, "local": 7, "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=used_const_base_wrong|fingerprint=active|owner=Program|passList=all|placement=if_false_alternate|site=after_block|trigger=json_parse", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 2, "local": 7, "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=used_const_base_wrong|fingerprint=active|owner=Program|passList=all|placement=non_constant_if|site=after_block|trigger=length", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 5, "local": 7, "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=used_const_base_wrong|fingerprint=active|owner=Program|passList=safe|placement=switch_case|site=in_block_after|trigger=regex", "outcome": {"completion": "throw", "errorConstructor": "TypeError", "errorMessage": "pattern.test is not a function", "globals": {"answer": "<undefined>", "local": 7, "dead": "<undefined>", "__cx02Fingerprint": "<undefined>"}}},
+  {"id": "declaration=used_const_base_wrong|fingerprint=active|owner=function|passList=all|placement=if_true|site=after_block|trigger=error_parameter", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": true, "local": 7, "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=used_const_base_wrong|fingerprint=inactive|owner=nested_function|passList=all|placement=bare_block|site=in_block_before|trigger=event_parameter", "outcome": {"completion": "throw", "errorConstructor": "ReferenceError", "errorMessage": "Cannot access 'event' before initialization", "globals": {"answer": "<undefined>", "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": "<undefined>"}}},
+  {"id": "declaration=used_let_base_wrong|fingerprint=active|owner=Program|passList=all|placement=bare_block|site=after_block|trigger=regex", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": true, "local": 7, "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=used_let_base_wrong|fingerprint=active|owner=Program|passList=all|placement=bare_block|site=in_block_before|trigger=array_method", "outcome": {"completion": "throw", "errorConstructor": "ReferenceError", "errorMessage": "Cannot access 'arr' before initialization", "globals": {"answer": "<undefined>", "local": "<undefined>", "dead": "<undefined>", "__cx02Fingerprint": "<undefined>"}}},
+  {"id": "declaration=used_let_base_wrong|fingerprint=active|owner=Program|passList=all|placement=non_constant_if|site=after_block|trigger=length", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 5, "local": 7, "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=used_let_base_wrong|fingerprint=active|owner=Program|passList=all|placement=switch_case|site=after_block|trigger=arithmetic_majority", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 19, "local": 7, "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=used_let_base_wrong|fingerprint=active|owner=function|passList=all|placement=if_false_alternate|site=after_block|trigger=event_parameter", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": "tick", "local": 7, "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=used_let_base_wrong|fingerprint=active|owner=function|passList=safe|placement=if_true|site=after_block|trigger=json_parse", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": 2, "local": 7, "dead": "<undefined>", "__cx02Fingerprint": 6}}},
+  {"id": "declaration=used_let_base_wrong|fingerprint=inactive|owner=nested_function|passList=all|placement=dead_code_injection|site=in_block_after|trigger=error_parameter", "outcome": {"completion": "normal", "errorConstructor": null, "errorMessage": null, "globals": {"answer": false, "local": 7, "dead": "<undefined>", "__cx02Fingerprint": "<undefined>"}}},
 ];
-type CloneTuple = {
-  spec: CloneSpec;
-  linked: "numeric" | "object";
-  owner: "same" | "nested";
-  placement: PropertyPlacement;
-  order: "trigger-first" | "linked-first";
-  shape: "proxy-clone" | "direct-control";
-};
-const cloneTuples: CloneTuple[] = cloneSpecs.flatMap((spec) =>
-  (["numeric", "object"] as const).flatMap((linked) =>
-    (["same", "nested"] as const).flatMap((owner) =>
-      (["BlockStatement", "SwitchCase"] as const).flatMap((placement) =>
-        (["trigger-first", "linked-first"] as const).flatMap((order) =>
-          (["proxy-clone", "direct-control"] as const).map((shape) =>
-            ({ spec, linked, owner, placement, order, shape })),
-        ),
-      ),
-    ),
-  ),
-);
-const CONTROL_FLOW_PROXY = "var _0xobj = { 'abc': function (_0xa, _0xb) { return _0xa(_0xb); } };";
-function cloneProgram(tuple: CloneTuple): string {
-  const n = "_0xf";
-  const trigger = "function (_0xq) { " + tuple.spec.declaration(n) +
-    " return " + tuple.spec.observation(n) + "; }";
-  const linkedDeclaration = tuple.linked === "numeric"
-    ? "var " + n + " = _0xq + 1;"
-    : "var " + n + " = { k: _0xq };";
-  const selected = propertyFunction(n, tuple.placement, 5);
-  const linked = tuple.owner === "nested"
-    ? "function (_0xq) { " + linkedDeclaration + " function inner() { " + selected +
-      " return " + n + "(); } return [inner(), typeof " + n + "]; }"
-    : "function (_0xq) { " + linkedDeclaration + " " + selected +
-      " return [" + n + "(), typeof " + n + "]; }";
-  const call = (body: string): string => tuple.shape === "proxy-clone"
-    ? "_0xobj['abc'](" + body + ", 10)"
-    : "(" + body + ")(10)";
-  const first = "globalThis.r1 = JSON.stringify(" + call(trigger) + ");";
-  const second = "globalThis.answer = JSON.stringify(" + call(linked) + ");";
-  return CONTROL_FLOW_PROXY + " " +
-    (tuple.order === "trigger-first" ? first + " " + second : second + " " + first) +
-    ACTIVE_FINGERPRINT_SUFFIX;
+const observedCoveringGlobals = ["answer", "local", "dead", "__cx02Fingerprint"] as const;
+
+function cloneRepresentative(shape: "proxy-clone" | "direct-control"): string {
+  const proxy = "var _0xobj={'abc':function(_0xa,_0xb){return _0xa(_0xb);}};";
+  const trigger = "function(_0xq){var _0xf=[];_0xf.push(7);if(true){class arr{}return _0xf.length;}}";
+  const linked = "function(_0xq){var _0xf=_0xq+1;function inner(){if(true){function _0xf(){return 5;}}return _0xf();}return [inner(),typeof _0xf];}";
+  const call = (body: string): string => shape === "proxy-clone" ? "_0xobj['abc'](" + body + ",10)" : "(" + body + ")(10)";
+  return proxy + "globalThis.r1=JSON.stringify(" + call(trigger) + ");globalThis.answer=JSON.stringify(" + call(linked) + ");" + ACTIVE_FINGERPRINT_SUFFIX;
 }
-const cloneRows = cloneTuples.map((tuple) => ({
-  ...tuple,
-  id: ["clone", tuple.spec.id, tuple.linked, tuple.owner, tuple.placement, tuple.order, tuple.shape].join("|"),
-  source: cloneProgram(tuple),
-  baseCorrect: tuple.placement === "BlockStatement" && tuple.owner === "nested",
-}));
 
 function declarationCounts(code: string, names: readonly string[]): Record<string, number> {
   const counts = Object.fromEntries(names.map((name) => [name, 0]));
@@ -977,7 +1020,11 @@ function positionlessBindingShape(source: string): { distinct: number; starts: A
     starts: Array.from(bindings, (binding) => binding.identifier.start ?? null).sort(),
   };
 }
-const BUNDLER_POSITIONLESS_SOURCE = '(function (modules) { var installed = {}; function __webpack_require__(id) { if (installed[id]) return installed[id].exports; var module = installed[id] = { exports: {} }; modules[id].call(module.exports, module, module.exports, __webpack_require__); return module.exports; } return __webpack_require__(0); })([function (module, exports, __webpack_require__) { var _0xf = /re/; module.exports = _0xf.test("re"); }, function (module, exports, __webpack_require__) { var _0xf = 1; function inner() { if (true) { function _0xf() { return 5; } } return _0xf(); } module.exports = inner() + _0xf; }]);';
+const BUNDLER_MODULES = [
+  'function(module,exports,__webpack_require__){var _0xf=/re/;if(true){class pattern{}module.exports=_0xf.test("re");}}',
+  'function(module,exports,__webpack_require__){var _0xf=module.seed+1;function inner(){if(true){function _0xf(){return 5;}}return _0xf();}module.exports=[inner(),typeof _0xf];}',
+];
+const BUNDLER_POSITIONLESS_SOURCE = '(function(modules){function __webpack_require__(id){var module={exports:{}};modules[id](module,module.exports,__webpack_require__);return module.exports;}return __webpack_require__(0);})([' + BUNDLER_MODULES.join(',') + ']);';
 
 function bundlerPositionlessBindingShape(source: string): { distinct: number; starts: Array<number | null> } {
   const bindings = new Set<{ identifier: { start?: number | null } }>();
@@ -1593,153 +1640,158 @@ describe("CX-02 selected dead-code branch scope preservation", () => {
     120_000,
   );
 
-  it("generated destination-spelling property covers 48 valid programs and rejects impossible parameter tuples", () => {
+  it("pairwise destination property preserves every Base-correct selected row", () => {
     const failures: string[] = [];
-    let executions = 0;
-    let baseCorrectExecutions = 0;
-    for (const row of destinationRows) {
-      const observed = ["answer", "__cx02Fingerprint"] as const;
-      const expected = executeNormalized(row.source, observed);
-      for (const result of safeAndAll(row.source, observed)) {
-        executions += 1;
-        if (row.baseCorrect) {
-          baseCorrectExecutions += 1;
-          if (result.warnings.length > 0 || JSON.stringify(result.outcome) !== JSON.stringify(expected)) {
-            failures.push(row.id + "|" + result.layer);
-          }
+    const classifications: Record<string, number> = { BASE_CORRECT: 0, BASE_WRONG: 0 };
+    expect(baseCoveringOutcomes.map((row) => row.id)).toEqual(covering.rows.map(tupleId));
+    for (const [index, row] of covering.rows.entries()) {
+      const source = coveringProgram(row);
+      const input = executeNormalized(source, observedCoveringGlobals);
+      const baseline = baseCoveringOutcomes[index].outcome;
+      const correct = JSON.stringify(input) === JSON.stringify(baseline);
+      classifications[correct ? "BASE_CORRECT" : "BASE_WRONG"] += 1;
+      for (const result of safeAndAll(source, observedCoveringGlobals)) {
+        if (correct && (result.warnings.length || JSON.stringify(result.outcome) !== JSON.stringify(input))) {
+          failures.push(tupleId(row) + "|" + result.layer);
         }
       }
     }
-    expect({
-      attempted: destinationTuples.length,
-      rejected: rejectedDestinationTuples.length,
-      rejectedKinds: Array.from(new Set(rejectedDestinationTuples.map(({ spec }) => spec.id))).sort(),
-      programs: destinationRows.length,
-      executions,
-      baseCorrectExecutions,
-      classificationOnlyExecutions: executions - baseCorrectExecutions,
-      failureCount: failures.length,
-      firstFailures: failures.slice(0, 12),
-    }).toEqual({
-      attempted: 56,
-      rejected: 8,
-      rejectedKinds: ["error-first", "event"],
-      programs: 48,
-      executions: 96,
-      baseCorrectExecutions: 76,
-      classificationOnlyExecutions: 20,
-      failureCount: 0,
-      firstFailures: [],
-    });
-  }, 600_000);
+    expect(classifications).toEqual({ BASE_CORRECT: 49, BASE_WRONG: 7 });
+    expect(failures).toEqual([]);
+  }, 120_000);
 
-  it("generated position-less clone property covers 192 programs and preserves exact Binding identity", () => {
-    const runtimeFailures: string[] = [];
-    const structuralFailures: string[] = [];
-    let executions = 0;
-    let baseCorrectExecutions = 0;
-    for (const row of cloneRows) {
-      const observed = ["r1", "answer", "__cx02Fingerprint"] as const;
-      const expected = executeNormalized(row.source, observed);
-      for (const result of safeAndAll(row.source, observed)) {
-        executions += 1;
-        if (row.baseCorrect) {
-          baseCorrectExecutions += 1;
-          if (result.warnings.length > 0 || JSON.stringify(result.outcome) !== JSON.stringify(expected)) {
-            runtimeFailures.push(row.id + "|" + result.layer);
-          }
-        }
-        const counts = declarationCounts(result.code, ["_0xf", row.spec.destination]);
-        if (counts._0xf !== 2 || counts[row.spec.destination] !== 1) {
-          structuralFailures.push(row.id + "|" + result.layer);
-        }
-      }
+  it("covering selection proves every valid pair and each retained row's unique tooth", () => {
+    const inventory = coveringInventory();
+    const covered = new Set(covering.rows.flatMap(obligations));
+    expect({ valid: inventory.valid.length, rejected: inventory.rejected.length }).toEqual({ valid: 10944, rejected: 1152 });
+    expect([...covered].sort()).toEqual(covering.universe);
+    expect(covering.rows).toHaveLength(56);
+    const invalidSources = inventory.valid.flatMap((row) => {
+      const parsed = parseWithDiagnostics(coveringProgram(row));
+      return parsed.completeness !== "whole" || parsed.recoveredErrors !== 0 || parsed.warnings.length ? [tupleId(row)] : [];
+    });
+    expect(invalidSources).toEqual([]);
+    expect(covering.rows.some((row) => ["if_true", "if_false_alternate", "dead_code_injection"].includes(row.placement)
+      && row.site !== "after_block" && row.declaration === "class")).toBe(true);
+    expect(covering.rows.some((row) => ["bare_block", "switch_case", "non_constant_if"].includes(row.placement)
+      && row.site !== "after_block" && ["async_function", "generator_function", "async_generator_function"].includes(row.declaration))).toBe(true);
+    for (const row of covering.rows) {
+      const tooth = covering.teeth[tupleId(row)];
+      expect(tooth).not.toBe("");
+      expect(obligations(row)).toContain(tooth);
+      expect(covering.rows.filter((other) => obligations(other).includes(tooth))).toEqual([row]);
     }
-    const witness = cloneRows.find(({ id }) =>
-      id === "clone|array|numeric|nested|BlockStatement|trigger-first|proxy-clone");
-    expect(witness).toBeDefined();
-    expect({
-      programs: cloneRows.length,
-      executions,
-      baseCorrectExecutions,
-      bindingShape: positionlessBindingShape(witness?.source ?? ""),
-      runtimeFailureCount: runtimeFailures.length,
-      firstRuntimeFailures: runtimeFailures.slice(0, 12),
-      structuralFailureCount: structuralFailures.length,
-      firstStructuralFailures: structuralFailures.slice(0, 12),
-    }).toEqual({
-      programs: 192,
-      executions: 384,
-      baseCorrectExecutions: 96,
-      bindingShape: { distinct: 3, starts: [null, null, null] },
-      runtimeFailureCount: 0,
-      firstRuntimeFailures: [],
-      structuralFailureCount: 0,
-      firstStructuralFailures: [],
-    });
-  }, 600_000);
+  }, 120_000);
 
-  it("bundler-unpack structural producer creates distinct position-less Binding objects", () => {
-    expect(bundlerPositionlessBindingShape(BUNDLER_POSITIONLESS_SOURCE)).toEqual({
-      distinct: 3,
-      starts: [null, null, null],
-    });
+  it("exact Binding-site availability includes declaration, references and constant violations", () => {
+    const failures: string[] = [];
+    for (const row of covering.rows) {
+      const source = coveringProgram(row);
+      const ast = parse(source);
+      const binding = getProbeBinding(ast);
+      const sites = exactSites(binding);
+      const destination = triggerSpecs[row.trigger].destination;
+      const unavailable = sites.some((site) => site.scope.hasBinding(destination));
+      let answerPath: SitePath | undefined;
+      traverse(ast, { AssignmentExpression(path: SitePath & { node: t.AssignmentExpression }) {
+        if (t.isMemberExpression(path.node.left) && t.isIdentifier(path.node.left.property, { name: "answer" })) answerPath = path;
+      } });
+      const within = (site: SitePath, ancestor: SitePath | undefined): boolean => {
+        for (let current: SitePath | null = site; current; current = current.parentPath) if (current === ancestor) return true;
+        return false;
+      };
+      const answerReferences = binding.referencePaths.filter((site) => within(site, answerPath));
+      expect(answerReferences.length).toBeGreaterThan(0);
+      expect(answerReferences.every((site) => site.scope.hasBinding(destination))).toBe(row.site !== "after_block");
+      semanticRenamePass.run(ast, source);
+      if (unavailable && binding.identifier.name === destination) failures.push(tupleId(row));
+    }
+    const writeSource = "var _0xv=[];_0xv.push(1);{class arr{} _0xv=[];}globalThis.answer=_0xv.length;";
+    const ast = parse(writeSource);
+    const binding = getProbeBinding(ast);
+    expect(binding.path.scope.hasBinding("arr")).toBe(false);
+    expect(binding.referencePaths.some((site) => site.scope.hasBinding("arr"))).toBe(false);
+    expect(binding.constantViolations.map((site) => site.scope.hasBinding("arr"))).toEqual([true]);
+    expect(exactSites(binding).length).toBe(new Set([binding.path, ...binding.referencePaths, ...binding.constantViolations]).size);
+    semanticRenamePass.run(ast, writeSource);
+    if (binding.identifier.name === "arr") failures.push("constant-violation-only");
+    expect(executeNormalized(generate(ast), ["answer"])).toEqual(executeNormalized(writeSource, ["answer"]));
+    expect(failures).toEqual([]);
   });
 
-  const destinationCliRows = destinationRows
-    .filter(({ spec, owner, placement }) =>
-      spec.id === "array" && owner === "nested" && placement === "BlockStatement")
-    .flatMap((row) => [
-      { ...row, mode: "default", unsafe: false },
-      { ...row, mode: "--unsafe", unsafe: true },
-    ]);
-  it.each(destinationCliRows)("destination property real CLI $mode $fingerprint", ({ source, unsafe }) => {
-    const observed = ["answer", "__cx02Fingerprint"] as const;
-    const expected = executeNormalized(source, observed);
-    const result = runCli(source, unsafe);
-    expect({
-      signal: result.signal,
-      status: result.status,
-      messages: result.stderrLines.filter((line) => /^(WARNING|ERROR):/.test(line)),
-      done: result.stdoutLines.filter((line) => line.startsWith("Done: ")).length,
-      present: result.output !== undefined,
-      execution: executeNormalized(result.output ?? "", observed),
-    }).toEqual({
-      signal: null,
-      status: 0,
-      messages: unsafe ? [UNSAFE_NOTICE] : [],
-      done: 1,
-      present: true,
-      execution: expected,
-    });
-  }, 120_000);
+  it("Annex B reservation follows exact Binding owner sites and preserves unrelated first-safe names", () => {
+    const rows = [
+      { polarity: "positive", expected: "items", source: "var _0xv=[];_0xv.push(1);function owner(){if(true){function arr(){}}globalThis.answer=_0xv.length;}owner();" },
+      { polarity: "unrelated", expected: "arr", source: "var _0xv=[];_0xv.push(1);function unrelated(){if(true){function arr(){}}return 3;}globalThis.other=unrelated();globalThis.answer=_0xv.length;" },
+    ];
+    for (const row of rows) {
+      const ast = parse(row.source);
+      const binding = getProbeBinding(ast);
+      let owner: SitePath | undefined;
+      traverse(ast, { FunctionDeclaration(path: SitePath & { node: t.FunctionDeclaration }) {
+        if (path.node.id?.name !== "arr") return;
+        for (let current = path.parentPath; current; current = current.parentPath) {
+          if (t.isFunction(current.node) || t.isProgram(current.node)) { owner = current; break; }
+        }
+      } });
+      expect(owner).toBeDefined();
+      const ownerRelevant = exactSites(binding).some((site) => {
+        for (let current: SitePath | null = site; current; current = current.parentPath) if (current === owner) return true;
+        return false;
+      });
+      expect(ownerRelevant).toBe(row.polarity === "positive");
+      semanticRenamePass.run(ast, row.source);
+      expect({ polarity: row.polarity, name: binding.identifier.name }).toEqual({ polarity: row.polarity, name: row.expected });
+      expect(executeNormalized(generate(ast), ["answer", "other"])).toEqual(executeNormalized(row.source, ["answer", "other"]));
+    }
+  });
 
-  const cloneCliRows = cloneRows
-    .filter(({ id }) => id === "clone|array|numeric|nested|BlockStatement|trigger-first|proxy-clone")
-    .flatMap((row) => [
-      { ...row, mode: "default", unsafe: false },
-      { ...row, mode: "--unsafe", unsafe: true },
-    ]);
-  it.each(cloneCliRows)("position-less clone property real CLI $mode", ({ source, unsafe }) => {
-    const observed = ["r1", "answer", "__cx02Fingerprint"] as const;
-    const expected = executeNormalized(source, observed);
-    const result = runCli(source, unsafe);
-    expect({
-      signal: result.signal,
-      status: result.status,
-      messages: result.stderrLines.filter((line) => /^(WARNING|ERROR):/.test(line)),
-      done: result.stdoutLines.filter((line) => line.startsWith("Done: ")).length,
-      present: result.output !== undefined,
-      execution: executeNormalized(result.output ?? "", observed),
-    }).toEqual({
-      signal: null,
-      status: 0,
-      messages: unsafe ? [UNSAFE_NOTICE] : [],
-      done: 1,
-      present: true,
-      execution: expected,
-    });
-  }, 120_000);
+  it("position-less proxy clone and direct control preserve exact Binding schedules", () => {
+    for (const shape of ["proxy-clone", "direct-control"] as const) {
+      const source = cloneRepresentative(shape);
+      const expected = executeNormalized(source, ["r1", "answer", "__cx02Fingerprint"]);
+      const bindingShape = positionlessBindingShape(source);
+      expect(bindingShape.distinct).toBe(3);
+      if (shape === "proxy-clone") expect(bindingShape.starts).toEqual([null, null, null]);
+      else expect(bindingShape.starts.every((start) => start !== null)).toBe(true);
+      for (const result of safeAndAll(source, ["r1", "answer", "__cx02Fingerprint"])) {
+        expect(result.warnings).toEqual([]);
+        expect(result.outcome).toEqual(expected);
+        expect(declarationCounts(result.code, ["_0xf", "items"])).toEqual({ _0xf: 2, items: 1 });
+      }
+    }
+  });
+
+  it("bundler-unpack invokes both extracted position-less modules with lexical destinations", () => {
+    expect(bundlerPositionlessBindingShape(BUNDLER_POSITIONLESS_SOURCE)).toEqual({ distinct: 3, starts: [null, null, null] });
+    for (const passes of [safeASTPasses, allASTPasses]) {
+      const result = runPipelineWithReport(BUNDLER_POSITIONLESS_SOURCE, passes, [formatPass]);
+      expect(result.warnings).toEqual([]);
+      const modules = parse(result.code).program.body.filter((node) => t.isFunctionDeclaration(node));
+      expect(modules).toHaveLength(2);
+      for (const [index, module] of modules.entries()) {
+        const call = "var module={exports:{}};" + module.id?.name + "(module,module.exports,function(){});globalThis.answer=module.exports;";
+        const source = "(" + BUNDLER_MODULES[index] + ")(module,module.exports,function(){});globalThis.answer=module.exports;";
+        expect(executeNormalized(result.code + call, ["answer"]))
+          .toEqual(executeNormalized("var module={exports:{}};" + source, ["answer"]));
+      }
+    }
+  });
+
+  it.each([{ mode: "default", unsafe: false }, { mode: "--unsafe", unsafe: true }])(
+    "destination capture reaches the real CLI $mode", ({ unsafe }) => {
+      const source = "var _0xv=[];_0xv.push(1);if(true){class arr{}globalThis.answer=_0xv.length;}";
+      const result = runCli(source, unsafe);
+      expect({ signal: result.signal, status: result.status,
+        messages: result.stderrLines.filter((line) => /^(WARNING|ERROR):/.test(line)),
+        done: result.stdoutLines.filter((line) => line.startsWith("Done: ")).length,
+        present: result.output !== undefined,
+        outcome: executeNormalized(result.output ?? "", ["answer"]),
+      }).toEqual({ signal: null, status: 0, messages: unsafe ? [UNSAFE_NOTICE] : [], done: 1, present: true,
+        outcome: executeNormalized(source, ["answer"]),
+      });
+    }, 120_000,
+  );
 
   it.each(linkageRows)("consumer linkage representative: $id", ({ source, passes }) => {
     const expected = executeNormalized(source, ["answer"]);
