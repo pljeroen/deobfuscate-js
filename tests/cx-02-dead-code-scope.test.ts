@@ -5,12 +5,16 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import vm from "node:vm";
 import { describe, expect, it } from "vitest";
-import { t } from "../src/babel.js";
+import { t, traverse } from "../src/babel.js";
 import { allASTPasses } from "../src/cli-shared.js";
 import { generate, parse } from "../src/parser.js";
 import { deadCodeEliminatePass } from "../src/passes/dead-code-eliminate.js";
 import { formatPass } from "../src/passes/format.js";
 import { astRenamePass } from "../src/passes/ast-rename.js";
+import { antiDebugPass } from "../src/passes/anti-debug.js";
+import { constantFoldPass } from "../src/passes/constant-fold.js";
+import { constantPropagatePass } from "../src/passes/constant-propagate.js";
+import { semanticRenamePass } from "../src/passes/semantic-rename.js";
 import { filterSafePasses, runPipelineWithReport } from "../src/pipeline.js";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -498,6 +502,248 @@ const classOracleCliCases = [
   { ...testCase, mode: "--unsafe", unsafe: true },
 ]);
 
+type ActivationOracleTemplate = {
+  id: string;
+  classification: "semantic" | "constant" | "boundedness";
+  directConsumer: "semantic" | "constant" | "constant-after-fold" | "anti-debug";
+  source: string;
+  observedGlobals: string[];
+  expectedDirectVariableNames?: string[];
+  expectedDirectParameterNames?: string[];
+  expectedUnrelatedAssignmentType?: string;
+  warningBoundary?: "labelled" | "if-clause";
+};
+
+const activationOracleTemplates: ActivationOracleTemplate[] = [
+  {
+    id: "SA01",
+    classification: "semantic",
+    directConsumer: "semantic",
+    source: 'function outer(){var _0xf=/f/;var _0xg=/g/;function inner(){if(true){function _0xf(){return 601;}}return _0xf();}globalThis.unrelated=_0xg.test("g");return inner();}globalThis.answer=outer();',
+    observedGlobals: ["answer", "unrelated"],
+    expectedDirectVariableNames: ["_0xf", "pattern"],
+  },
+  {
+    id: "SA02",
+    classification: "semantic",
+    directConsumer: "semantic",
+    source: 'var invoke=function(){var _0xf=[];_0xf.push(1);var inner=function(){if(false){globalThis.dead=602;}else{function _0xf(){return 602;}}return _0xf();};return inner()+_0xf.length;};globalThis.answer=invoke();',
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "SA03",
+    classification: "semantic",
+    directConsumer: "semantic",
+    source: 'function outer(){var n=0;for(var _0xf=0;_0xf<2;_0xf++){n++;}var first=()=>{var second=()=>{if("cx02"==="cx02"){function _0xf(){return 603;}}else{globalThis.dead=603;}return _0xf();};return second();};return first()+n;}globalThis.answer=outer();',
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "SA04",
+    classification: "semantic",
+    directConsumer: "semantic",
+    source: 'function outer(_0xf,callback){if(_0xf){return 0;}var holder={method(){if(true){function _0xf(){return 604;}}return _0xf();}};return holder.method();}globalThis.answer=outer(null,1);',
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "SA05",
+    classification: "semantic",
+    directConsumer: "semantic",
+    source: 'var a=[1,2];var _0xf=a.length;if(false){globalThis.dead=605;}else{function _0xf(){return 605;}}globalThis.answer=_0xf();',
+    observedGlobals: ["answer"],
+    warningBoundary: "labelled",
+  },
+  {
+    id: "SA06",
+    classification: "semantic",
+    directConsumer: "semantic",
+    source: 'function outer(){var _0xf=1;_0xf=_0xf+1;_0xf=_0xf*2;function middle(){var holder={method(){if("cx02"==="cx02"){function _0xf(){return 606;}}else{globalThis.dead=606;}return _0xf();}};return holder.method();}return middle()+_0xf;}globalThis.answer=outer();',
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "SA07",
+    classification: "semantic",
+    directConsumer: "semantic",
+    source: 'function outer(){var _0xf=JSON.parse("{}");var inner=function(){if(true){function _0xf(){return 607;}}return _0xf();};return inner();}globalThis.answer=outer();',
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "SA08",
+    classification: "semantic",
+    directConsumer: "semantic",
+    source: 'var target={addEventListener:function(name,callback){globalThis.answer=callback(null);}};target.addEventListener("x",function(_0xf){var nested=()=>{if(false){globalThis.dead=608;}else{function _0xf(){return 608;}}return _0xf();};return nested();});',
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "CP01",
+    classification: "constant",
+    directConsumer: "constant-after-fold",
+    source: 'function outer(){var s="b";var f="a"+s;var unrelated=9;function inner(){if(true){function f(){return 701;}}return f();}globalThis.unrelated=unrelated;return inner();}globalThis.answer=outer();',
+    observedGlobals: ["answer", "unrelated"],
+    expectedUnrelatedAssignmentType: "NumericLiteral",
+  },
+  {
+    id: "CP02",
+    classification: "constant",
+    directConsumer: "constant",
+    source: 'var target=function(){return -1;};var alias=target;if(false){globalThis.dead=702;}else{function alias(){return 702;}}globalThis.answer=alias();',
+    observedGlobals: ["answer"],
+    warningBoundary: "if-clause",
+  },
+  {
+    id: "CP03",
+    classification: "constant",
+    directConsumer: "constant",
+    source: 'function outer(){var f=function(){return -1;};var alias=f;var inner=()=>{if("cx02"==="cx02"){function f(){return 703;}}else{globalThis.dead=703;}return alias();};return inner();}globalThis.answer=outer();',
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "CP04",
+    classification: "constant",
+    directConsumer: "constant",
+    source: 'var f=["x","y"];if(true){function f(){return 704;}}globalThis.answer=String(f[0]);',
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "CP05",
+    classification: "constant",
+    directConsumer: "constant",
+    source: 'function outer(c){var f;if(c){f=1;}else{f=2;}if(false){globalThis.dead=705;}else{function f(){return 705;}}return typeof f;}globalThis.answer=outer(true);',
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "BC01",
+    classification: "boundedness",
+    directConsumer: "semantic",
+    source: 'function outer(){"use strict";var _0xf=/re/;if(true){function _0xf(){return 801;}}return _0xf.test("re");}globalThis.answer=outer();',
+    observedGlobals: ["answer"],
+    expectedDirectVariableNames: ["pattern"],
+  },
+  {
+    id: "BC02",
+    classification: "boundedness",
+    directConsumer: "semantic",
+    source: 'function outer(_0xf,callback){if(_0xf){return 0;}if(true){function _0xf(){return 802;}}return typeof _0xf;}globalThis.answer=outer(null,1);',
+    observedGlobals: ["answer"],
+    expectedDirectParameterNames: ["err", "callback"],
+  },
+  {
+    id: "BC03",
+    classification: "boundedness",
+    directConsumer: "constant",
+    source: 'function outer(){var target=function(){return 1;};var alias=target;function inner(target){return alias();}return inner(function(){return 2;});}globalThis.answer=outer();',
+    observedGlobals: ["answer"],
+  },
+  {
+    id: "BC04",
+    classification: "boundedness",
+    directConsumer: "anti-debug",
+    source: 'function host(){function _0xdead(){return 1;}function trap(){return [].constructor("debugger")();}trap(_0xdead);return 7;}globalThis.answer=host();',
+    observedGlobals: ["answer"],
+  },
+];
+
+const activationOracleRows = activationOracleTemplates.flatMap((template) =>
+  (["inactive", "active"] as const).map((fingerprint) => ({ ...template, fingerprint })),
+);
+
+const activationOracleCliCases = activationOracleTemplates
+  .filter(({ id }) => id === "SA01" || id === "CP01")
+  .flatMap((template) =>
+    (["inactive", "active"] as const).flatMap((fingerprint) =>
+      ([{ mode: "default", unsafe: false }, { mode: "--unsafe", unsafe: true }] as const)
+        .map((cli) => ({ ...template, fingerprint, ...cli })),
+    ),
+  );
+
+function directActivationConsumer(
+  template: ActivationOracleTemplate,
+  source: string,
+): { code: string; warnings: string[]; execution: Execution } {
+  const passes = template.directConsumer === "semantic"
+    ? [semanticRenamePass]
+    : template.directConsumer === "constant"
+      ? [constantPropagatePass]
+      : template.directConsumer === "constant-after-fold"
+        ? [constantFoldPass, constantPropagatePass]
+        : [antiDebugPass];
+  const result = runPipelineWithReport(source, passes, [formatPass]);
+  return {
+    code: result.code,
+    warnings: result.warnings,
+    execution: executeFresh(result.code, template.observedGlobals),
+  };
+}
+
+function outerFunctionParameterNames(code: string): string[] {
+  const outer = parse(code).program.body.find((statement) => t.isFunctionDeclaration(statement));
+  if (!t.isFunctionDeclaration(outer)) return [];
+  return outer.params.flatMap((parameter) => t.isIdentifier(parameter) ? [parameter.name] : []);
+}
+
+function globalAssignmentRightType(code: string, propertyName: string): string | undefined {
+  let result: string | undefined;
+  traverse(parse(code), {
+    AssignmentExpression(path: { node: t.AssignmentExpression }) {
+      if (
+        t.isMemberExpression(path.node.left) &&
+        t.isIdentifier(path.node.left.object, { name: "globalThis" }) &&
+        t.isIdentifier(path.node.left.property, { name: propertyName })
+      ) {
+        result = path.node.right.type;
+      }
+    },
+  });
+  return result;
+}
+
+function namedDirectBodyFunctionDeclarationCount(code: string, name: string): number {
+  return outerFunctionBody(code).body.filter(
+    (statement) => t.isFunctionDeclaration(statement) && statement.id?.name === name,
+  ).length;
+}
+
+function warningBoundaryResult(kind: "labelled" | "if-clause"): {
+  recoveredErrors: number;
+  pipelineWarning: boolean;
+  cliStatus: number | null;
+  cliSignal: NodeJS.Signals | null;
+  cliWarning: boolean;
+  cliDoneLines: number;
+  cliOutputPresent: boolean;
+  cleanBlockWarnings: string[];
+  cleanSwitchWarnings: string[];
+} {
+  const warnedSource = kind === "labelled"
+    ? "if(true){function sibling(){} label: function _0xf(){return 5;}}globalThis.answer=_0xf();"
+    : "function outer(){if(true){function sibling(){} if(globalThis.c===undefined) function _0xf(){return 6;}}return _0xf();}globalThis.answer=outer();";
+  const warned = runPipelineWithReport(warnedSource, safeASTPasses, [formatPass]);
+  const cli = runCli(warnedSource, false);
+  const cliWarningsAndErrors = cli.stderrLines.filter((line) => /^(WARNING|ERROR):/.test(line));
+  const cleanBlock = runPipelineWithReport(
+    "function outer(){if(true){function _0xf(){return 1;}}return _0xf();}globalThis.answer=outer();",
+    safeASTPasses,
+    [formatPass],
+  );
+  const cleanSwitch = runPipelineWithReport(
+    "function outer(){switch(1){case 1:function _0xf(){return 1;}}return _0xf();}globalThis.answer=outer();",
+    safeASTPasses,
+    [formatPass],
+  );
+  return {
+    recoveredErrors: warned.initialParse.recoveredErrors,
+    pipelineWarning: warned.warnings.length > 0
+      && warned.warnings.every((warning) => warning.startsWith("Parse error (recovered):")),
+    cliStatus: cli.status,
+    cliSignal: cli.signal,
+    cliWarning: cliWarningsAndErrors.length > 0
+      && cliWarningsAndErrors.every((warning) => warning.startsWith("WARNING: Parse error (recovered):")),
+    cliDoneLines: cli.stdoutLines.filter((line) => line.startsWith("Done: ")).length,
+    cliOutputPresent: cli.output !== undefined,
+    cleanBlockWarnings: cleanBlock.warnings,
+    cleanSwitchWarnings: cleanSwitch.warnings,
+  };
+}
+
 describe("CX-02 selected dead-code branch scope preservation", () => {
   const classCases = [
     {
@@ -962,6 +1208,120 @@ describe("CX-02 selected dead-code branch scope preservation", () => {
       expect(result.stdoutLines.filter((line) => line.startsWith("Done: "))).toHaveLength(1);
       expect(result.output).toBeDefined();
       expect(executeFresh(result.output ?? "", observedGlobals)).toEqual(expected);
+    },
+    120_000,
+  );
+
+  it.each(activationOracleRows)(
+    "activation oracle $id $fingerprint ($classification)",
+    ({
+      id,
+      classification,
+      source: templateSource,
+      observedGlobals,
+      fingerprint,
+      expectedDirectVariableNames,
+      expectedDirectParameterNames,
+      expectedUnrelatedAssignmentType,
+      warningBoundary,
+      ...template
+    }) => {
+      const source = withFingerprint(templateSource, fingerprint);
+      const sourceExecution = executeFresh(source, observedGlobals);
+      const direct = directActivationConsumer(
+        { id, classification, source: templateSource, observedGlobals, ...template },
+        source,
+      );
+      const prefixes = productionPrefixExecutions(source, observedGlobals);
+      const cleanedBC04: Execution = { completion: "normal", globals: { answer: 7 } };
+      const prefixExpectation = (passes: typeof allASTPasses): Execution[] => passes.map((_, index) =>
+        id === "BC04" && fingerprint === "active" &&
+          passes.slice(0, index + 1).some((pass) => pass.name === "anti-debug")
+          ? cleanedBC04
+          : sourceExecution,
+      );
+      const directExpected = id === "BC04" && fingerprint === "active"
+        ? cleanedBC04
+        : sourceExecution;
+      const expectedBC04Count = fingerprint === "active" ? 0 : 1;
+      const boundary = warningBoundary && fingerprint === "inactive"
+        ? warningBoundaryResult(warningBoundary)
+        : undefined;
+
+      expect({ direct: direct.warnings, prefixes: prefixes.warnings }).toEqual({
+        direct: [],
+        prefixes: [],
+      });
+      expect({
+        source: sourceExecution,
+        direct: direct.execution,
+        safe: prefixes.safe,
+        all: prefixes.all,
+        directVariableNames: expectedDirectVariableNames
+          ? directVariableNames(direct.code)
+          : undefined,
+        directParameterNames: expectedDirectParameterNames
+          ? outerFunctionParameterNames(direct.code)
+          : undefined,
+        unrelatedAssignmentType: expectedUnrelatedAssignmentType
+          ? globalAssignmentRightType(direct.code, "unrelated")
+          : undefined,
+        directBC04Count: id === "BC04"
+          ? namedDirectBodyFunctionDeclarationCount(direct.code, "_0xdead")
+          : undefined,
+        warningBoundary: boundary,
+      }).toEqual({
+        source: sourceExecution,
+        direct: directExpected,
+        safe: prefixExpectation(safeASTPasses),
+        all: prefixExpectation(allASTPasses),
+        directVariableNames: expectedDirectVariableNames,
+        directParameterNames: expectedDirectParameterNames,
+        unrelatedAssignmentType: expectedUnrelatedAssignmentType,
+        directBC04Count: id === "BC04" ? expectedBC04Count : undefined,
+        warningBoundary: boundary
+          ? {
+              recoveredErrors: 1,
+              pipelineWarning: true,
+              cliStatus: 0,
+              cliSignal: null,
+              cliWarning: true,
+              cliDoneLines: 1,
+              cliOutputPresent: true,
+              cleanBlockWarnings: [],
+              cleanSwitchWarnings: [],
+            }
+          : undefined,
+      });
+    },
+    120_000,
+  );
+
+  it.each(activationOracleCliCases)(
+    "activation oracle real CLI $mode $id $fingerprint",
+    ({ source: templateSource, observedGlobals, fingerprint, unsafe }) => {
+      const source = withFingerprint(templateSource, fingerprint);
+      const expected = executeFresh(source, observedGlobals);
+      const result = runCli(source, unsafe);
+      const warningsAndErrors = result.stderrLines.filter((line) => /^(WARNING|ERROR):/.test(line));
+
+      expect({
+        source: expected,
+        signal: result.signal,
+        status: result.status,
+        warningsAndErrors,
+        doneLines: result.stdoutLines.filter((line) => line.startsWith("Done: ")).length,
+        outputPresent: result.output !== undefined,
+        outputExecution: executeFresh(result.output ?? "", observedGlobals),
+      }).toEqual({
+        source: expected,
+        signal: null,
+        status: 0,
+        warningsAndErrors: unsafe ? [UNSAFE_NOTICE] : [],
+        doneLines: 1,
+        outputPresent: true,
+        outputExecution: expected,
+      });
     },
     120_000,
   );

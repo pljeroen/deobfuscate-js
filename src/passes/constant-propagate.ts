@@ -12,12 +12,14 @@ import { traverse, t } from "../babel.js";
 import type { File } from "@babel/types";
 import type { NodePath } from "@babel/traverse";
 import type { ASTPass } from "../types.js";
+import { annexBLinkedBindings } from "./annex-b-linkage.js";
 
 export const constantPropagatePass: ASTPass = {
   name: "constant-propagate",
   description: "Inline variables assigned once to constant values",
 
   run(ast: File): File {
+    const annexBLinked = annexBLinkedBindings(ast);
     traverse(ast, {
       VariableDeclarator(path) {
         const init = path.get("init");
@@ -28,6 +30,7 @@ export const constantPropagatePass: ASTPass = {
 
         const binding = path.scope.getBinding(id.node.name);
         if (!binding) return;
+        if (annexBLinked.has(binding)) return;
 
         // Must not be reassigned
         if (binding.constantViolations.length > 0) return;
@@ -51,6 +54,7 @@ export const constantPropagatePass: ASTPass = {
         if (t.isIdentifier(init.node)) {
           const targetBinding = path.scope.getBinding(init.node.name);
           if (!targetBinding) return;
+          if (annexBLinked.has(targetBinding)) return;
           if (targetBinding.constantViolations.length > 0) return;
           for (const ref of [...binding.referencePaths]) {
             if (!ref.isIdentifier()) continue;
@@ -111,6 +115,7 @@ export const constantPropagatePass: ASTPass = {
 
         const binding = path.scope.getBinding(path.node.argument.name);
         if (!binding) return;
+        if (annexBLinked.has(binding)) return;
 
         // Must have exactly 2 constant violations (assignments)
         if (binding.constantViolations.length !== 2) return;
