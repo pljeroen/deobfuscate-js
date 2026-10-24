@@ -9,36 +9,10 @@
  */
 
 import { traverse } from "../babel.js";
-import type { File, FunctionDeclaration, Node } from "@babel/types";
+import type { File } from "@babel/types";
 import type { ASTPass } from "../types.js";
 
-type ScopeBinding = {
-  kind: string;
-  scope: ScopeLike;
-};
-
-type ScopeLike = {
-  bindings: Record<string, ScopeBinding>;
-  getBinding(name: string): ScopeBinding | undefined;
-};
-
-type FunctionParentPath = {
-  node: {
-    body: Node;
-  };
-  scope: ScopeLike;
-};
-
-type FunctionDeclarationPath = {
-  node: FunctionDeclaration;
-  parentPath: {
-    node: Node;
-    isBlockStatement(): boolean;
-    isSwitchCase(): boolean;
-  };
-  getFunctionParent(): FunctionParentPath | null;
-  isInStrictMode(): boolean;
-};
+import { runtimeNameFacts } from "./annex-b-linkage.js";
 
 // Names that are conventional and should not be renamed
 const KEEP_NAMES = new Set(["i", "j", "k", "x", "y", "z", "_", "$"]);
@@ -92,38 +66,12 @@ export const astRenamePass: ASTPass = {
       },
     });
     if (!hasObfuscated) return ast;
+    const facts = runtimeNameFacts(ast);
 
     traverse(ast, {
       "FunctionDeclaration|FunctionExpression|ArrowFunctionExpression"(path) {
         const scope = path.scope;
         let nameIdx = 0;
-
-        // Annex B links a sloppy block function to the binding resolved from
-        // its enclosing function. Renaming only that binding breaks the link.
-        const annexBProtectedBindings = new Set<unknown>();
-        path.traverse({
-          FunctionDeclaration(declarationPath: FunctionDeclarationPath) {
-            const { node, parentPath } = declarationPath;
-            if (!node.id || node.async || node.generator || declarationPath.isInStrictMode()) return;
-
-            const enclosingFunction = declarationPath.getFunctionParent();
-            if (!enclosingFunction) return;
-
-            const belowAnnexBBoundary = parentPath.isSwitchCase()
-              || (parentPath.isBlockStatement() && parentPath.node !== enclosingFunction.node.body);
-            if (!belowAnnexBBoundary) return;
-
-            const resolvedBinding = enclosingFunction.scope.getBinding(node.id.name);
-            if (!resolvedBinding || scope.bindings[node.id.name] !== resolvedBinding) return;
-
-            const sameFunctionKindQualifies = resolvedBinding.kind === "var"
-              || resolvedBinding.kind === "hoisted"
-              || resolvedBinding.kind === "local";
-            if (resolvedBinding.scope === enclosingFunction.scope && !sameFunctionKindQualifies) return;
-
-            annexBProtectedBindings.add(resolvedBinding);
-          },
-        });
 
         // Collect unbound references in this scope to avoid collisions
         const unboundNames = new Set<string>();
@@ -161,7 +109,7 @@ export const astRenamePass: ASTPass = {
             nameIdx++;
           } while (scope.hasBinding(newName) || GLOBALS.has(newName) || unboundNames.has(newName) || descendantNames.has(newName));
 
-          if (annexBProtectedBindings.has(binding)) continue;
+          if (facts.renameUnavailable(binding, newName)) continue;
 
           // Use Babel's scope.rename for safe, correct renaming
           scope.rename(name, newName);

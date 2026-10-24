@@ -9,6 +9,7 @@
 import { traverse, t } from "../babel.js";
 import type { File } from "@babel/types";
 import type { ASTPass } from "../types.js";
+import { runtimeNameFacts } from "./annex-b-linkage.js";
 
 export const constantFoldPass: ASTPass = {
   name: "constant-fold",
@@ -24,6 +25,7 @@ export const constantFoldPass: ASTPass = {
       changed = false;
       iterations++;
 
+      const facts = runtimeNameFacts(ast);
       traverse(ast, {
         // !0 -> true, !1 -> false, !true -> false, !false -> true,
         // typeof literal, void 0
@@ -52,12 +54,12 @@ export const constantFoldPass: ASTPass = {
             changed = true;
             return;
           }
-          if (op === "void" && t.isNumericLiteral(arg) && arg.value === 0) {
+          if (op === "void" && t.isNumericLiteral(arg) && arg.value === 0 && facts.intrinsicAt(path, "undefined")) {
             path.replaceWith(t.identifier("undefined"));
             changed = true;
             return;
           }
-          if (op === "typeof" && isSimpleLiteral(arg)) {
+          if (op === "typeof" && isSimpleLiteral(arg) && facts.intrinsicReadsSafe(path.get("argument"))) {
             const val = getLiteralValue(arg);
             if (val !== undefined || t.isIdentifier(arg)) {
               const typeStr = t.isIdentifier(arg) && arg.name === "undefined"
@@ -72,7 +74,7 @@ export const constantFoldPass: ASTPass = {
         // Fold binary expressions where both sides are literals
         BinaryExpression(path) {
           const { left, right } = path.node;
-          if (!isSimpleLiteral(left) || !isSimpleLiteral(right)) return;
+          if (!isSimpleLiteral(left) || !isSimpleLiteral(right) || !facts.intrinsicReadsSafe(path)) return;
 
           const lv = getLiteralValue(left);
           const rv = getLiteralValue(right);
@@ -89,7 +91,7 @@ export const constantFoldPass: ASTPass = {
         // Fold logical expressions with literal operands
         LogicalExpression(path) {
           const left = path.node.left;
-          if (!isSimpleLiteral(left)) return;
+          if (!isSimpleLiteral(left) || !facts.intrinsicReadsSafe(path.get("left"))) return;
 
           const lv = getLiteralValue(left);
           const op = path.node.operator;
@@ -116,14 +118,12 @@ export const constantFoldPass: ASTPass = {
         // Fold ternary with constant test
         ConditionalExpression(path) {
           const test = path.node.test;
-          if (!isSimpleLiteral(test)) return;
+          if (!isSimpleLiteral(test) || !facts.intrinsicReadsSafe(path.get("test"))) return;
 
           const tv = getLiteralValue(test);
-          if (tv) {
-            path.replaceWith(path.node.consequent);
-          } else {
-            path.replaceWith(path.node.alternate);
-          }
+          const selected = tv ? path.node.consequent : path.node.alternate;
+          if (facts.wouldCreateDirectEval(selected, path)) return;
+          path.replaceWith(selected);
           changed = true;
         },
       });

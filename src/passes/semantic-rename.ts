@@ -16,7 +16,7 @@
 import { traverse, t } from "../babel.js";
 import type { File } from "@babel/types";
 import type { ASTPass } from "../types.js";
-import { annexBLinkedBindings, annexBRetainedFunctionOwners } from "./annex-b-linkage.js";
+import { runtimeNameFacts } from "./annex-b-linkage.js";
 
 type BindingSite = {
   scope: { hasBinding(name: string): boolean };
@@ -42,8 +42,9 @@ export const semanticRenamePass: ASTPass = {
   description: "Rename obfuscated variables based on usage context",
 
   run(ast: File): File {
-    const annexBLinked = annexBLinkedBindings(ast);
-    const annexBRetainedOwners = annexBRetainedFunctionOwners(ast);
+    const facts = runtimeNameFacts(ast);
+    const annexBLinked = facts.linked;
+    const annexBRetainedOwners = facts.owners;
     // Per-scope renames: maps the exact Babel binding object to its new name
     // This avoids the global map bug where the same old name in different scopes
     // gets the same new name even when those scopes should be independent.
@@ -94,7 +95,7 @@ export const semanticRenamePass: ASTPass = {
 
         const binding = path.scope.getBinding(name);
         if (!binding) return;
-        if (annexBLinked.has(binding)) return;
+        if (annexBLinked.has(binding) || facts.observed(binding)) return;
         if (scopeRenames.has(binding)) return;
 
         // Pattern: var _0x = 0; _0x < N; _0x++
@@ -139,7 +140,7 @@ export const semanticRenamePass: ASTPass = {
 
         const binding = path.scope.getBinding(name);
         if (!binding) return;
-        if (annexBLinked.has(binding)) return;
+        if (annexBLinked.has(binding) || facts.observed(binding)) return;
         if (scopeRenames.has(binding)) return;
 
         const init = path.node.init;
@@ -164,7 +165,7 @@ export const semanticRenamePass: ASTPass = {
 
         const binding = path.scope.getBinding(first.name);
         if (!binding) return;
-        if (annexBLinked.has(binding)) return;
+        if (annexBLinked.has(binding) || facts.observed(binding)) return;
         if (scopeRenames.has(binding)) return;
 
         // Check if first param is thrown or used as if-test
@@ -222,7 +223,7 @@ export const semanticRenamePass: ASTPass = {
             const binding = path.scope.getBinding(oldName);
             if (!binding) continue;
             if (binding === scheduledBinding) {
-              if (destinationUnavailable(binding, newName, annexBRetainedOwners)) continue;
+              if (destinationUnavailable(binding, newName, annexBRetainedOwners) || facts.renameUnavailable(binding, newName)) continue;
               path.scope.rename(oldName, newName);
             }
           }
@@ -345,7 +346,7 @@ function getScopeKey(scope: any): string {
 function destinationUnavailable(
   binding: RenameBinding,
   candidate: string,
-  annexBRetainedOwners?: Map<string, Set<object>>,
+  annexBRetainedOwners?: ReadonlyMap<string, ReadonlySet<object>>,
 ): boolean {
   const sites = new Set([binding.path, ...binding.referencePaths, ...binding.constantViolations]);
   const owners = annexBRetainedOwners?.get(candidate);
@@ -369,7 +370,7 @@ function tryAssignCandidate(
   globalUsedNames: Set<string>,
   scopeScheduledNames: Map<string, Set<string>>,
   freeNames?: Set<string>,
-  annexBRetainedOwners?: Map<string, Set<object>>,
+  annexBRetainedOwners?: ReadonlyMap<string, ReadonlySet<object>>,
 ): boolean {
   const scopeKey = getScopeKey(path.scope);
   const scheduled = scopeScheduledNames.get(scopeKey) ?? new Set<string>();
@@ -398,11 +399,11 @@ function detectUsagePattern(
   scopeRenames: Map<RenameBinding, { oldName: string; newName: string }>,
   globalUsedNames: Set<string>,
   scopeScheduledNames: Map<string, Set<string>>,
-  annexBLinked: Set<unknown>,
+  annexBLinked: ReadonlySet<unknown>,
   predicate: (binding: any) => boolean,
   candidates: string[],
   freeNames?: Set<string>,
-  annexBRetainedOwners?: Map<string, Set<object>>,
+  annexBRetainedOwners?: ReadonlyMap<string, ReadonlySet<object>>,
 ): void {
   traverse(ast, {
     VariableDeclarator(path) {
@@ -428,11 +429,11 @@ function detectInitPattern(
   scopeRenames: Map<RenameBinding, { oldName: string; newName: string }>,
   globalUsedNames: Set<string>,
   scopeScheduledNames: Map<string, Set<string>>,
-  annexBLinked: Set<unknown>,
+  annexBLinked: ReadonlySet<unknown>,
   predicate: (binding: any) => boolean,
   candidates: string[],
   freeNames?: Set<string>,
-  annexBRetainedOwners?: Map<string, Set<object>>,
+  annexBRetainedOwners?: ReadonlyMap<string, ReadonlySet<object>>,
 ): void {
   traverse(ast, {
     VariableDeclarator(path) {
@@ -458,9 +459,9 @@ function detectEventParam(
   scopeRenames: Map<RenameBinding, { oldName: string; newName: string }>,
   globalUsedNames: Set<string>,
   scopeScheduledNames: Map<string, Set<string>>,
-  annexBLinked: Set<unknown>,
+  annexBLinked: ReadonlySet<unknown>,
   freeNames?: Set<string>,
-  annexBRetainedOwners?: Map<string, Set<object>>,
+  annexBRetainedOwners?: ReadonlyMap<string, ReadonlySet<object>>,
 ): void {
   traverse(ast, {
     CallExpression(path) {

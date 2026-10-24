@@ -11,17 +11,24 @@
 import { traverse, t } from "../babel.js";
 import type { File } from "@babel/types";
 import type { ASTPass } from "../types.js";
+import type { RuntimeNameFacts } from "./annex-b-linkage.js";
+import { runtimeNameFacts } from "./annex-b-linkage.js";
 
 export const deadCodeEliminatePass: ASTPass = {
   name: "dead-code-eliminate",
   description: "Remove unreachable code and unused bindings",
 
   run(ast: File): File {
+    let facts = runtimeNameFacts(ast);
     // Pass 1: Remove unreachable branches
     traverse(ast, {
       IfStatement(path) {
+        if (!facts.evaluationSafe(path.get("test"))) return;
         const testResult = path.get("test").evaluate();
         if (!testResult.confident) return;
+
+        const discarded = path.get(testResult.value ? "alternate" : "consequent");
+        if (discarded.node && retainsRuntimeBinding(discarded, facts)) return;
 
         if (testResult.value) {
           // if(true) { A } else { B } -> A
@@ -55,17 +62,19 @@ export const deadCodeEliminatePass: ASTPass = {
 
       // Ternary with constant test
       ConditionalExpression(path) {
+        if (!facts.evaluationSafe(path.get("test"))) return;
         const testResult = path.get("test").evaluate();
         if (!testResult.confident) return;
 
-        if (testResult.value) {
-          path.replaceWith(path.node.consequent);
-        } else {
-          path.replaceWith(path.node.alternate);
-        }
+        const selected = testResult.value ? path.node.consequent : path.node.alternate;
+        if (facts.wouldCreateDirectEval(selected, path)) return;
+        path.replaceWith(selected);
       },
     });
 
+    // Rebind before the next destructive phase; removed branches change scopes.
+    traverse(ast, { Program(path: any) { path.scope.crawl(); } });
+    facts = runtimeNameFacts(ast);
     // Pass 2: Remove unreachable statements after return/throw
     traverse(ast, {
       "BlockStatement|Program"(path) {
@@ -79,7 +88,7 @@ export const deadCodeEliminatePass: ASTPass = {
         for (let i = 0; i < body.length; i++) {
           if (foundTerminator) {
             // FunctionDeclarations are hoisted — they're available before the return
-            if (!t.isFunctionDeclaration(body[i])) {
+            if (!t.isFunctionDeclaration(body[i]) && !retainsRuntimeBinding(path.get("body")[i], facts)) {
               toRemove.push(i);
             }
             continue;
@@ -105,6 +114,8 @@ export const deadCodeEliminatePass: ASTPass = {
       },
     });
 
+    traverse(ast, { Program(path: any) { path.scope.crawl(); } });
+    facts = runtimeNameFacts(ast);
     // Pass 3: Remove unused variable declarations
     traverse(ast, {
       VariableDeclaration(path) {
@@ -121,7 +132,7 @@ export const deadCodeEliminatePass: ASTPass = {
           if (!id.isIdentifier()) continue;
 
           const binding = decl.scope.getBinding(id.node.name);
-          if (!binding) continue;
+          if (!binding || facts.observed(binding)) continue;
 
           // Only remove if no references
           if (binding.referencePaths.length > 0) continue;
@@ -129,7 +140,7 @@ export const deadCodeEliminatePass: ASTPass = {
 
           // Check if initializer has side effects
           const init = decl.get("init");
-          if (init.node && !isPure(init.node, isNested)) continue;
+          if (init.node && (!facts.intrinsicReadsSafe(init) || !isPure(init.node, isNested))) continue;
 
           toRemove.push(i);
         }
@@ -148,6 +159,7 @@ export const deadCodeEliminatePass: ASTPass = {
     // Refresh scope info after Pass 3 mutations before Pass 4
     traverse(ast, { Program(path) { path.scope.crawl(); } });
 
+    facts = runtimeNameFacts(ast);
     // Pass 4: Remove unreferenced nested function declarations (scoped wrappers etc.)
     // Only removes functions inside other functions — top-level may be exports.
     traverse(ast, {
@@ -163,7 +175,7 @@ export const deadCodeEliminatePass: ASTPass = {
           return;
         }
         const binding = path.scope.getBinding(path.node.id.name);
-        if (!binding) return;
+        if (!binding || facts.observed(binding)) return;
         if (binding.referencePaths.length > 0) return;
         if (binding.constantViolations.length > 0) return;
         path.remove();
@@ -173,6 +185,37 @@ export const deadCodeEliminatePass: ASTPass = {
     return ast;
   },
 };
+
+/** Declarations instantiate before execution, even in a discarded branch/tail.
+ * Inspect bindings at their declaration scopes, stopping at private function/class
+ * bodies so a nested observer does not make an unrelated outer carrier live.
+ */
+function retainsRuntimeBinding(site: any, facts: RuntimeNameFacts): boolean {
+  let retained = false;
+  const inspect = (path: any): void => {
+    let ids: Record<string, t.Identifier> = {};
+    if (path.isVariableDeclarator()) ids = t.getBindingIdentifiers(path.node.id);
+    else if (path.isFunctionDeclaration() || path.isClassDeclaration()) {
+      if (path.node.id) ids = { [path.node.id.name]: path.node.id };
+    } else if (path.isImportDeclaration()) ids = t.getBindingIdentifiers(path.node);
+    for (const name of Object.keys(ids)) {
+      if (facts.observed(path.scope.getBinding(name))) retained = true;
+      if (path.isFunctionDeclaration()) {
+        const owner = path.getFunctionParent() ?? path.findParent((p: any) => p.isProgram());
+        if (facts.owners.get(name)?.has(owner)) retained = true;
+      }
+    }
+  };
+  inspect(site);
+  if (!site.isFunction() && !site.isClass()) site.traverse({
+    enter(path: any) {
+      inspect(path);
+      if (retained) path.stop();
+      else if (path.isFunction() || path.isClass()) path.skip();
+    },
+  });
+  return retained;
+}
 
 /** Check whether removing a block would leak a direct declaration into its parent scope. */
 function hasScopeSensitiveDeclaration(block: t.BlockStatement): boolean {

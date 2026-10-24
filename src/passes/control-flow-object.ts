@@ -14,6 +14,7 @@ import { traverse, t } from "../babel.js";
 import type { File } from "@babel/types";
 import type { ASTPass } from "../types.js";
 import type { NodePath } from "@babel/traverse";
+import { runtimeNameFacts } from "./annex-b-linkage.js";
 
 type PropertyInfo =
   | { type: "string"; value: string }
@@ -36,7 +37,7 @@ export const controlFlowObjectPass: ASTPass = {
       iterations++;
       traverse(ast, {
         VariableDeclaration(path) {
-          if (inlineControlFlowObject(path)) {
+          if (inlineControlFlowObject(path, ast)) {
             changed = true;
             path.stop();
           }
@@ -48,7 +49,7 @@ export const controlFlowObjectPass: ASTPass = {
   },
 };
 
-function inlineControlFlowObject(path: NodePath<t.VariableDeclaration>): boolean {
+function inlineControlFlowObject(path: NodePath<t.VariableDeclaration>, ast: File): boolean {
   if (path.node.declarations.length !== 1) return false;
   const decl = path.node.declarations[0];
   if (!t.isIdentifier(decl.id) || !t.isObjectExpression(decl.init)) return false;
@@ -58,6 +59,8 @@ function inlineControlFlowObject(path: NodePath<t.VariableDeclaration>): boolean
   path.scope.crawl();
   let binding = path.scope.getBinding(objName);
   if (!binding) return false;
+  let facts = runtimeNameFacts(ast);
+  if (facts.written(binding)) return false;
 
   // Safety: no reassignment of the variable itself
   if (binding.constantViolations.length > 0) return false;
@@ -78,7 +81,7 @@ function inlineControlFlowObject(path: NodePath<t.VariableDeclaration>): boolean
   for (const ref of [...binding.referencePaths]) {
     if (ref.removed || !ref.parentPath) continue;
     const memberPath = ref.parentPath;
-    if (!t.isMemberExpression(memberPath.node)) continue;
+    if (!t.isMemberExpression(memberPath.node) || facts.dynamicLookup(ref, objName)) continue;
 
     const propName = getMemberPropertyName(memberPath.node);
     if (!propName) continue;
@@ -109,11 +112,13 @@ function inlineControlFlowObject(path: NodePath<t.VariableDeclaration>): boolean
     path.scope.crawl();
     binding = path.scope.getBinding(objName);
     if (!binding) break;
+    facts = runtimeNameFacts(ast);
+    if (facts.written(binding)) break;
 
     for (const ref of binding.referencePaths) {
       if (ref.removed || !ref.parentPath) continue;
       const memberPath = ref.parentPath;
-      if (!t.isMemberExpression(memberPath.node)) continue;
+      if (!t.isMemberExpression(memberPath.node) || facts.dynamicLookup(ref, objName)) continue;
 
       const propName = getMemberPropertyName(memberPath.node);
       if (!propName) continue;
@@ -146,6 +151,7 @@ function inlineControlFlowObject(path: NodePath<t.VariableDeclaration>): boolean
         } else if (info.type === "call") {
           if (info.calleeIdx >= args.length) continue;
           const callee = t.cloneNode(args[info.calleeIdx]);
+          if (facts.possibleDirectEval(callee, callPath)) continue;
           let passedArgs: t.Expression[];
           if (info.hasRest) {
             passedArgs = args.slice(info.calleeIdx + 1).map(a => t.cloneNode(a));
@@ -173,7 +179,8 @@ function inlineControlFlowObject(path: NodePath<t.VariableDeclaration>): boolean
   if (inlinedAny) {
     path.scope.crawl();
     const updatedBinding = path.scope.getBinding(objName);
-    if (!updatedBinding || updatedBinding.referencePaths.length === 0) {
+    facts = runtimeNameFacts(ast);
+    if (updatedBinding && !facts.observed(updatedBinding) && updatedBinding.referencePaths.length === 0) {
       path.remove();
     }
   }
@@ -191,6 +198,8 @@ function mergeSequentialAssignments(ast: File): void {
       if (decl.init.properties.length !== 0) return;
 
       const objName = decl.id.name;
+      const facts = runtimeNameFacts(ast);
+      if (facts.observed(path.scope.getBinding(objName))) return;
       const objExpr = decl.init;
       const siblings = path.getAllNextSiblings();
       const toRemove: NodePath[] = [];

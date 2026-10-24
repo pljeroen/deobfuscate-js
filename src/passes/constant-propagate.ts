@@ -12,14 +12,14 @@ import { traverse, t } from "../babel.js";
 import type { File } from "@babel/types";
 import type { NodePath } from "@babel/traverse";
 import type { ASTPass } from "../types.js";
-import { annexBLinkedBindings } from "./annex-b-linkage.js";
+import { runtimeNameFacts } from "./annex-b-linkage.js";
 
 export const constantPropagatePass: ASTPass = {
   name: "constant-propagate",
   description: "Inline variables assigned once to constant values",
 
   run(ast: File): File {
-    const annexBLinked = annexBLinkedBindings(ast);
+    let facts = runtimeNameFacts(ast);
     traverse(ast, {
       VariableDeclarator(path) {
         const init = path.get("init");
@@ -30,7 +30,7 @@ export const constantPropagatePass: ASTPass = {
 
         const binding = path.scope.getBinding(id.node.name);
         if (!binding) return;
-        if (annexBLinked.has(binding)) return;
+        if (facts.written(binding)) return;
 
         // Must not be reassigned
         if (binding.constantViolations.length > 0) return;
@@ -39,10 +39,10 @@ export const constantPropagatePass: ASTPass = {
         if (binding.referencePaths.length === 0) return;
 
         // Propagate literal values
-        if (isSimpleLiteral(init.node)) {
+        if (isSimpleLiteral(init.node) && facts.intrinsicReadsSafe(init)) {
           for (const ref of [...binding.referencePaths]) {
-            if (ref.isIdentifier()) {
-              ref.replaceWith(t.cloneNode(init.node));
+            if (ref.isIdentifier() && !facts.dynamicLookup(ref, id.node.name)) {
+              ref.replaceWith(t.isIdentifier(init.node) && !facts.intrinsicAt(ref, "undefined") ? t.unaryExpression("void", t.numericLiteral(0)) : t.cloneNode(init.node));
             }
           }
           return;
@@ -54,10 +54,11 @@ export const constantPropagatePass: ASTPass = {
         if (t.isIdentifier(init.node)) {
           const targetBinding = path.scope.getBinding(init.node.name);
           if (!targetBinding) return;
-          if (annexBLinked.has(targetBinding)) return;
+          if (facts.written(targetBinding) || facts.dynamicLookup(init, init.node.name)) return;
           if (targetBinding.constantViolations.length > 0) return;
           for (const ref of [...binding.referencePaths]) {
-            if (!ref.isIdentifier()) continue;
+            if (!ref.isIdentifier() || facts.dynamicLookup(ref, id.node.name) || facts.dynamicLookup(ref, init.node.name)) continue;
+            if (facts.wouldCreateDirectEval(init.node, ref)) continue;
             // Verify target resolves to the same binding at this reference site
             const refTargetBinding = ref.scope.getBinding(init.node.name);
             if (refTargetBinding !== targetBinding) continue;
@@ -67,10 +68,11 @@ export const constantPropagatePass: ASTPass = {
         }
 
         // Propagate constant array element access: const arr = ["a", "b"]; arr[0] → "a"
-        if (t.isArrayExpression(init.node) && isAllLiterals(init.node)) {
+        if (t.isArrayExpression(init.node) && isAllLiterals(init.node) && facts.intrinsicReadsSafe(init)) {
           // Verify no element mutations (arr[i] = value)
           const hasMutation = binding.referencePaths.some(ref => {
             const memberPath = ref.parentPath;
+            if (facts.dynamicLookup(ref, id.node.name)) return true;
             if (!memberPath?.isMemberExpression() || memberPath.node.object !== ref.node) return false;
             const assignPath = memberPath.parentPath;
             if (assignPath?.isAssignmentExpression() && assignPath.node.left === memberPath.node) return true;
@@ -83,6 +85,7 @@ export const constantPropagatePass: ASTPass = {
           let allReplaced = true;
           for (const ref of [...binding.referencePaths]) {
             const memberPath = ref.parentPath;
+            if (facts.dynamicLookup(ref, id.node.name)) { allReplaced = false; continue; }
             if (!memberPath?.isMemberExpression() ||
                 memberPath.node.object !== ref.node ||
                 !memberPath.node.computed) {
@@ -98,15 +101,17 @@ export const constantPropagatePass: ASTPass = {
             }
             const el = elements[idx];
             if (!el || t.isSpreadElement(el)) { allReplaced = false; continue; }
-            memberPath.replaceWith(t.cloneNode(el));
+            memberPath.replaceWith(t.isIdentifier(el) && !facts.intrinsicAt(memberPath, "undefined") ? t.unaryExpression("void", t.numericLiteral(0)) : t.cloneNode(el));
           }
-          if (allReplaced) {
+          if (allReplaced && !facts.observed(binding)) {
             path.remove();
           }
         }
       },
     });
 
+    // Rebind after substitutions/removals before querying cross-branch dependencies.
+    facts = runtimeNameFacts(ast);
     // Phase 2: Cross-branch typeof folding
     traverse(ast, {
       UnaryExpression(path) {
@@ -115,7 +120,7 @@ export const constantPropagatePass: ASTPass = {
 
         const binding = path.scope.getBinding(path.node.argument.name);
         if (!binding) return;
-        if (annexBLinked.has(binding)) return;
+        if (facts.written(binding)) return;
 
         // Must have exactly 2 constant violations (assignments)
         if (binding.constantViolations.length !== 2) return;
@@ -123,7 +128,7 @@ export const constantPropagatePass: ASTPass = {
         // Must not have a meaningful initializer (only bare `var x;` or `var x = undefined;`)
         if (binding.path.isVariableDeclarator()) {
           const init = binding.path.node.init;
-          if (init && !(t.isIdentifier(init) && init.name === "undefined")) {
+          if (init && !(t.isIdentifier(init) && init.name === "undefined" && facts.intrinsicAt(binding.path.get("init"), "undefined"))) {
             return;
           }
         }
@@ -142,6 +147,7 @@ export const constantPropagatePass: ASTPass = {
         if (b0.ifNode !== b1.ifNode) return;
         if (b0.branch === b1.branch) return;
 
+        if (!facts.intrinsicReadsSafe(v0.get("right")) || !facts.intrinsicReadsSafe(v1.get("right")) || facts.dynamicLookup(path, path.node.argument.name)) return;
         // Both assigned values must have the same typeof class
         const t0 = typeofClass(v0.node.right);
         const t1 = typeofClass(v1.node.right);
