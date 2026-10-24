@@ -209,8 +209,10 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
       return value | (ordinary || distinctRoot ? 0 : named) | (rootSlot && !distinctRoot ? ROOT : 0);
     }
     if (t.isMemberExpression(node) || t.isOptionalMemberExpression(node)) {
-      if (!(origin(node.object, site, seen) & ROOT)) return 0;
       const key = propertyName(node.property, node.computed);
+      if (key === "constructor" && (t.isFunctionExpression(node.object)
+        || t.isArrowFunctionExpression(node.object) || t.isClassExpression(node.object))) return CONSTRUCTOR;
+      if (!(origin(node.object, site, seen) & ROOT)) return 0;
       return key === "eval" ? EVAL : key === "Function" ? CONSTRUCTOR : key === "globalThis" ? ROOT
         : key === null ? EVAL | CONSTRUCTOR | ROOT : 0;
     }
@@ -297,10 +299,13 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
       for (const name of Object.keys(ids)) if (withLookup(left, name)) mark(left.scope.getBinding(name));
     }
     if (path.isMemberExpression() || path.isOptionalMemberExpression()) {
-      if (!(origin(path.node.object, path) & ROOT)) continue;
+      const write = isWriteTarget(path);
+      if (!(origin(path.node.object, path) & ROOT)) {
+        if (!write && (origin(path.node, path) & CONSTRUCTOR)) registerRead(path.node, path);
+        continue;
+      }
       const key = propertyName(path.node.property, path.node.computed);
       const parent = path.parentPath;
-      const write = isWriteTarget(path);
       markGlobal(key, write || key === null, mutatesValue(path) || !write);
       if (!write) registerRead(path.node, path);
     }
