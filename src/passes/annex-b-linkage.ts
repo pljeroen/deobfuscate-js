@@ -246,8 +246,11 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
     // the read itself: an intrinsic used inside void f(...) is still invoked.
     let position = site;
     while (position.parentPath?.isParenthesizedExpression()) position = position.parentPath;
-    if (node === site.node && position.parentPath?.isUnaryExpression({ operator: "void" })
-      && position.parentPath.node.argument === position.node) return;
+    const parent = position.parentPath;
+    const discarded = !!parent && ((parent.isUnaryExpression({ operator: "void" })
+      && parent.node.argument === position.node)
+      || (parent.isExpressionStatement() && parent.node.expression === position.node));
+    if (node === site.node && discarded) return;
     codeValues.push({ node, site });
     if (origin(node, site) & (EVAL | CONSTRUCTOR | CREATED)) globalDynamic = true;
   };
@@ -380,14 +383,4 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
     observed: (binding: any) => observed.has(binding), written: (binding: any) => written.has(binding),
     dynamicLookup, intrinsicAt, intrinsicReadsSafe, evaluationSafe, renameUnavailable, possibleDirectEval, wouldCreateDirectEval,
   });
-}
-
-/** Exact linked bindings, including same-spelled foreign-owner distinctions. */
-export function annexBLinkedBindings(ast: File): ReadonlySet<unknown> {
-  return runtimeNameFacts(ast).linked;
-}
-
-/** Exact owners, including implicit owner names absent from Babel bindings. */
-export function annexBRetainedFunctionOwners(ast: File): ReadonlyMap<string, ReadonlySet<object>> {
-  return runtimeNameFacts(ast).owners;
 }
