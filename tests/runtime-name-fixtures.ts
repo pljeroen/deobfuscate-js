@@ -104,6 +104,13 @@ export const witnesses = [
     "answer": 2
   },
   {
+    "id": "inherited-function-constructor",
+    "pass": "constantPropagate",
+    "source": "var value = 1;\n(function () {}).constructor(\"value = 2\")();\nglobalThis.answer = value;\n",
+    "sha256": "2de1bd605f1e6e5d4421629c5f867a77b298eff2929ab614c26cdb81603bf08c",
+    "answer": 2
+  },
+  {
     "id": "global-property",
     "pass": "constantPropagate",
     "source": "var _0xv = 1;\nglobalThis._0xv = 2;\nglobalThis.answer = _0xv;\n",

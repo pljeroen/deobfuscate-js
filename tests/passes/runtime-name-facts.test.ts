@@ -432,6 +432,14 @@ const runtimeBindingCases: any[] = [
   {"partition":"P-R2-08","id":"strict-len","pass":"semanticRename","source":"function outer(){var _0xlong=[1].length;function child(_0xlong){\"use strict\";globalThis.answer=eval(\"typeof len\");}child(0);}outer();","answer":{"type":"string","value":"undefined"}},
   {"partition":"P-R2-08","id":"hidden-candidate-control","pass":"semanticRename","source":"function outer(){var _0xlong=[1].length;function child(_0xlong,len){\"use strict\";globalThis.answer=eval(\"typeof len\");}child(0,9);}outer();","answer":{"type":"string","value":"number"},"post":"rename:_0xlong"},
   {"partition":"P-R2-09","id":"initializer-shadow","pass":"constantPropagate","source":"function probe(undefined){const value=undefined;answer=value;}probe(7);","answer":{"type":"number","value":7}},
+  {"partition":"P-R4-01","id":"inherited-constructor-computed","pass":"constantPropagate","source":"var value=1;(function(){})[\"constructor\"](\"value=2\")();answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R4-01","id":"inherited-constructor-arrow","pass":"constantPropagate","source":"var value=1;(()=>{}).constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R4-01","id":"inherited-constructor-class","pass":"constantPropagate","source":"var value=1;(class{}).constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R4-01","id":"inherited-constructor-shadowed-Function","pass":"constantPropagate","source":"var Function=function(){return function(){};};var value=1;(function(){}).constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R4-01","id":"inherited-constructor-async","pass":"constantPropagate","source":"var value=1;(async function(){}).constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R4-01","id":"inherited-constructor-generator","pass":"constantPropagate","source":"var value=1;(function*(){}).constructor(\"value=2\")().next();answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R4-02","id":"own-function-constructor-control","pass":"constantPropagate","source":"const fn=function(){};fn.constructor=function(){return function(){};};var value=1;fn.constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":1},"post":"numeric"},
+  {"partition":"P-R4-02","id":"object-constructor-control","pass":"constantPropagate","source":"var value=1;({constructor:function(){return function(){}}}).constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":1},"post":"numeric"},
 ];
 
 describe("runtime name resolution additions", () => {
