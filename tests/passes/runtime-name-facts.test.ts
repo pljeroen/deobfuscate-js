@@ -281,3 +281,175 @@ describe("runtime name resolution", () => {
     expect(observe(code)).toEqual(observe(source));
   });
 });
+
+import vm from "node:vm";
+
+function observeRuntimeFrame(source: string, frame: string): any {
+  const effects: any[] = [];
+  const context: any = vm.createContext({});
+  const root = vm.runInContext("globalThis", context);
+  if (frame === "consume") context.consume = (target: any) => {
+    effects.push("consume");
+    target.Function("value=2")();
+  };
+  if (frame === "iterator") Object.defineProperty(context, Symbol.iterator, {
+    value: function* () {
+      effects.push("iterator", encode(root._0xlen));
+      root.Function("value=2")();
+      yield root._0xlen;
+    },
+    enumerable: false,
+  });
+  if (frame === "external") context.external = {root, Ctor: root.Function};
+  let completion: any = {kind: "normal"};
+  try {new vm.Script(source).runInContext(context, {timeout: 1000});}
+  catch (error: any) {completion = {kind: "throw", name: error.name, message: error.message};}
+  return {completion, globals: {answer: Object.hasOwn(context, "answer") ? encode(context.answer) : {type: "absent"}}, effects};
+}
+
+function expectRuntimePostcondition(ast: any, post: string): void {
+  const declarations = nodes(ast, "VariableDeclarator");
+  if (post === "numeric") {
+    const answer = nodes(ast, "AssignmentExpression").find((node: any) => node.left.name === "answer" || node.left.property?.name === "answer");
+    expect(answer?.right.type).toBe("NumericLiteral");
+  } else if (post.startsWith("rename:")) {
+    expect(declarations.some((node: any) => node.id.name === post.slice(7))).toBe(false);
+  } else if (post === "no-if") {
+    expect(nodes(ast, "IfStatement")).toHaveLength(0);
+  } else if (post === "no-conditional" || post === "optional-selected") {
+    expect(nodes(ast, "ConditionalExpression")).toHaveLength(0);
+    if (post === "optional-selected") expect(nodes(ast, "OptionalCallExpression")).toHaveLength(1);
+  } else if (post === "indirect-conditional") {
+    expect(nodes(ast, "ConditionalExpression")).toHaveLength(1);
+    expect(bareEvalCalls(ast)).toBe(0);
+  } else if (post === "no-ops-call") {
+    expect(nodes(ast, "CallExpression").filter((node: any) => node.callee.type === "MemberExpression" && node.callee.object.name === "ops")).toHaveLength(0);
+  } else if (post === "no-storage") {
+    expect(declarations.some((node: any) => node.id.name === "ops")).toBe(false);
+    expect(nodes(ast, "MemberExpression").filter((node: any) => node.object.name === "ops")).toHaveLength(0);
+  } else if (post === "clean-hidden") {
+    expect(declarations.some((node: any) => node.id.name === "hidden")).toBe(false);
+  } else if (post === "clean-tail") {
+    expect(nodes(ast, "StringLiteral").some((node: any) => node.value === "unreachable")).toBe(false);
+  } else if (post === "function-hidden") {
+    expect(nodes(ast, "FunctionDeclaration").some((node: any) => node.id?.name === "hidden")).toBe(true);
+  } else {
+    throw new Error("Unknown test postcondition: " + post);
+  }
+}
+
+const runtimeBindingCases: any[] = [
+  {"partition":"P-R2-01","id":"exact-hoist-return","pass":"deadCodeEliminate","source":"function probe(){\"use strict\";eval(\"hidden=42\");globalThis.answer=hidden;return;var hidden;}probe();","answer":{"type":"number","value":42}},
+  {"partition":"P-R2-01","id":"hoist-return-init","pass":"deadCodeEliminate","source":"function probe(){\"use strict\";eval(\"hidden=42\");globalThis.answer=hidden;return;var hidden=events.push(\"unreachable\");}probe();","answer":{"type":"number","value":42}},
+  {"partition":"P-R2-01","id":"hoist-throw","pass":"deadCodeEliminate","source":"function probe(){\"use strict\";try{eval(\"hidden=42\");globalThis.answer=hidden;throw 0;var hidden;}catch(error){events.push(error);}}probe();","answer":{"type":"number","value":42},"events":{"type":"array","values":[{"type":"number","value":0}]}},
+  {"partition":"P-R2-01","id":"hoist-break","pass":"deadCodeEliminate","source":"function probe(){\"use strict\";while(true){eval(\"hidden=42\");globalThis.answer=hidden;break;var hidden;}}probe();","answer":{"type":"number","value":42}},
+  {"partition":"P-R2-01","id":"hoist-continue","pass":"deadCodeEliminate","source":"function probe(){\"use strict\";for(let count=0;count<1;count++){eval(\"hidden=42\");globalThis.answer=hidden;continue;var hidden;}}probe();","answer":{"type":"number","value":42}},
+  {"partition":"P-R2-01","id":"hoist-destructure","pass":"deadCodeEliminate","source":"function probe(){\"use strict\";eval(\"hidden=42\");globalThis.answer=hidden;return;var {hidden}=events.push(\"unreachable\");}probe();","answer":{"type":"number","value":42}},
+  {"partition":"P-R2-01","id":"hoist-block","pass":"deadCodeEliminate","source":"function probe(){\"use strict\";eval(\"hidden=42\");globalThis.answer=hidden;return;{var hidden;}}probe();","answer":{"type":"number","value":42}},
+  {"partition":"P-R2-01","id":"hoist-for","pass":"deadCodeEliminate","source":"function probe(){\"use strict\";eval(\"hidden=42\");globalThis.answer=hidden;return;for(var hidden of [1]){}}probe();","answer":{"type":"number","value":42}},
+  {"partition":"P-R2-01","id":"hoist-annex-b","pass":"deadCodeEliminate","source":"function probe(){eval(\"\\\"use strict\\\";hidden=42\");globalThis.answer=hidden;return;{function hidden(){}}}probe();","answer":{"type":"number","value":42}},
+  {"partition":"P-R2-01","id":"hoist-function-control","pass":"deadCodeEliminate","source":"function probe(){\"use strict\";eval(\"globalThis.answer=hidden()\");return;function hidden(){return 7;}}probe();","answer":{"type":"number","value":7},"post":"function-hidden"},
+  {"partition":"P-R2-01","id":"hoist-ordinary-unreachable","pass":"deadCodeEliminate","source":"function probe(){\"use strict\";globalThis.answer=42;return;events.push(\"unreachable\");var unused;}probe();","answer":{"type":"number","value":42},"post":"clean-tail"},
+  {"partition":"P-R2-01","id":"let-dynamic-tdz","pass":"deadCodeEliminate","source":"function probe(){\"use strict\";globalThis.answer=eval(\"typeof hidden\");return;let hidden;}probe();","answer":{"type":"absent"},"error":"ReferenceError"},
+  {"partition":"P-R2-01","id":"class-dynamic-tdz","pass":"deadCodeEliminate","source":"function probe(){\"use strict\";globalThis.answer=eval(\"typeof hidden\");return;class hidden{}}probe();","answer":{"type":"absent"},"error":"ReferenceError"},
+  {"partition":"P-R2-01","id":"branch-else-hoist","pass":"deadCodeEliminate","source":"function probe(){\"use strict\";eval(\"hidden=42\");globalThis.answer=hidden;if(true){events.push(\"selected\");}else{var hidden;}}probe();","answer":{"type":"number","value":42},"events":{"type":"array","values":[{"type":"string","value":"selected"}]}},
+  {"partition":"P-R2-01","id":"branch-consequent-hoist","pass":"deadCodeEliminate","source":"function probe(){\"use strict\";eval(\"hidden=42\");globalThis.answer=hidden;if(false){var hidden;}else{events.push(\"selected\");}}probe();","answer":{"type":"number","value":42},"events":{"type":"array","values":[{"type":"string","value":"selected"}]}},
+  {"partition":"P-R2-01","id":"block-lexical-clean","pass":"deadCodeEliminate","source":"function probe(){\"use strict\";globalThis.answer=eval(\"typeof hidden\");return;{let hidden;}}probe();","answer":{"type":"string","value":"undefined"},"post":"clean-hidden"},
+  {"partition":"P-R2-01","id":"function-var-clean","pass":"deadCodeEliminate","source":"function probe(){\"use strict\";globalThis.answer=eval(\"typeof hidden\");return;function inner(){var hidden;}events.push(\"unreachable\");}probe();","answer":{"type":"string","value":"undefined"},"post":"clean-tail"},
+  {"partition":"P-R2-02","id":"nonintrinsic-zero-constant-propagate","pass":"constantPropagate","source":"function probe(){const eval=0;var value=1;try{eval(\"value=42\");}catch(error){events.push(error.name);}answer=value;}probe();","answer":{"type":"number","value":1},"events":{"type":"array","values":[{"type":"string","value":"TypeError"}]},"post":"numeric"},
+  {"partition":"P-R2-02","id":"nonintrinsic-zero-ast-rename","pass":"astRename","source":"function probe(){const eval=0;var _0xv=1;try{eval(\"_0xv=42\");}catch(error){events.push(error.name);}answer=_0xv;}probe();","answer":{"type":"number","value":1},"events":{"type":"array","values":[{"type":"string","value":"TypeError"}]},"post":"rename:_0xv"},
+  {"partition":"P-R2-02","id":"nonintrinsic-zero-semantic-rename","pass":"semanticRename","source":"function probe(){const eval=0;var _0xlen=[1].length;try{eval(\"_0xlen=42\");}catch(error){events.push(error.name);}answer=_0xlen;}probe();","answer":{"type":"number","value":1},"events":{"type":"array","values":[{"type":"string","value":"TypeError"}]},"post":"rename:_0xlen"},
+  {"partition":"P-R2-02","id":"nonintrinsic-zero-dead-code-eliminate","pass":"deadCodeEliminate","source":"function probe(){const eval=0;var value=1;try{eval(\"value=42\");}catch(e){events.push(e.name);}if(value){answer=42;}else{answer=1;}}probe();","answer":{"type":"number","value":42},"events":{"type":"array","values":[{"type":"string","value":"TypeError"}]},"post":"no-if"},
+  {"partition":"P-R2-02","id":"nonintrinsic-zero-constant-fold","pass":"constantFold","source":"function probe(){const eval=0;try{(true?eval:function(){})(\"ignored\");}catch(e){events.push(e.name);}answer=1;}probe();","answer":{"type":"number","value":1},"events":{"type":"array","values":[{"type":"string","value":"TypeError"}]},"post":"no-conditional"},
+  {"partition":"P-R2-02","id":"nonintrinsic-zero-control-flow-object","pass":"controlFlowObject","source":"function probe(){const eval=0;var ops={call:function(f,s){return f(s);}};try{ops.call(eval,\"ignored\");}catch(e){events.push(e.name);}answer=1;}probe();","answer":{"type":"number","value":1},"events":{"type":"array","values":[{"type":"string","value":"TypeError"}]},"post":"no-ops-call"},
+  {"partition":"P-R2-03","id":"discard-eval-constant-propagate","pass":"constantPropagate","source":"var value=1;void eval;answer=value;","answer":{"type":"number","value":1},"post":"numeric"},
+  {"partition":"P-R2-03","id":"discard-eval-semantic-rename","pass":"semanticRename","source":"var _0xlen=[1].length;void eval;answer=_0xlen;","answer":{"type":"number","value":1},"post":"rename:_0xlen"},
+  {"partition":"P-R2-03","id":"discard-eval-dead-code-eliminate","pass":"deadCodeEliminate","source":"var hidden=42;void eval;answer=1;","answer":{"type":"number","value":1},"post":"clean-hidden"},
+  {"partition":"P-R2-03","id":"discard-eval-control-flow-object","pass":"controlFlowObject","source":"var ops={text:\"x\"};void eval;answer=ops.text;","answer":{"type":"string","value":"x"},"post":"no-storage"},
+  {"partition":"P-R2-03","id":"discard-Function-constant-propagate","pass":"constantPropagate","source":"var value=1;void Function;answer=value;","answer":{"type":"number","value":1},"post":"numeric"},
+  {"partition":"P-R2-03","id":"discard-Function-semantic-rename","pass":"semanticRename","source":"var _0xlen=[1].length;void Function;answer=_0xlen;","answer":{"type":"number","value":1},"post":"rename:_0xlen"},
+  {"partition":"P-R2-03","id":"discard-Function-dead-code-eliminate","pass":"deadCodeEliminate","source":"var hidden=42;void Function;answer=1;","answer":{"type":"number","value":1},"post":"clean-hidden"},
+  {"partition":"P-R2-03","id":"discard-Function-control-flow-object","pass":"controlFlowObject","source":"var ops={text:\"x\"};void Function;answer=ops.text;","answer":{"type":"string","value":"x"},"post":"no-storage"},
+  {"partition":"P-R2-03","id":"invoked-eval","pass":"constantPropagate","source":"var value=1;(0,eval)(\"value=2\");answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R2-03","id":"escaped-eval","pass":"constantPropagate","source":"var value=1;[ eval ].forEach(fn=>fn(\"value=2\"));answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R2-03","id":"invoked-Function","pass":"constantPropagate","source":"var value=1;Function(\"value=2\")();answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R2-03","id":"escaped-Function","pass":"constantPropagate","source":"var value=1;[ Function ].forEach(fn=>fn(\"value=2\")());answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R2-04","id":"before-init:constant-propagate","pass":"constantPropagate","source":"let value=1;eval(\"value=42\");answer=value;var eval=function(code){return code;};","answer":{"type":"number","value":42}},
+  {"partition":"P-R2-04","id":"before-init:constant-fold","pass":"constantFold","source":"function probe(){eval(\"var undefined=7\");answer=void 0;}probe();var eval=function(code){return code;};","answer":{"type":"undefined"}},
+  {"partition":"P-R2-04","id":"block-order:constant-propagate","pass":"constantPropagate","source":"const saved=globalThis.eval;var eval=function(code){return code;};globalThis.eval=saved;{let value=1;eval(\"value=42\");answer=value;}","answer":{"type":"number","value":42}},
+  {"partition":"P-R2-04","id":"compound-final:constant-propagate","pass":"constantPropagate","source":"const saved=globalThis.eval;var eval=function(code){return code;};globalThis.eval=saved;function probe(){var value=1;eval(\"value=42\");answer=value;}probe();","answer":{"type":"number","value":42}},
+  {"partition":"P-R2-04","id":"constructor:constant-propagate","pass":"constantPropagate","source":"const actual=(function(){}).constructor;var Function=function(){return function(){};};let value=1;install(actual);Function(\"value=2\")();answer=value;function install(Constructor){globalThis.Function=Constructor;}","answer":{"type":"number","value":2}},
+  {"partition":"P-R2-04","id":"immutable-callee-control","pass":"controlFlowObject","source":"const eval=function(code){return 1;};function probe(){const ops={call:function(f,s){return f(s);}};consume(globalThis);answer=ops.call(eval,\"ignored\");}probe();","answer":{"type":"number","value":1},"post":"no-ops-call","frame":"consume","effects":["consume"]},
+  {"partition":"P-R2-05","id":"constant-fold:conditional","pass":"constantFold","source":"function probe(local){(true?eval:function(code){return code;})(\"local=42\");answer=local;}probe(1);","answer":{"type":"number","value":1},"post":"indirect-conditional"},
+  {"partition":"P-R2-05","id":"constant-fold:grouped","pass":"constantFold","source":"function probe(local){((false?function(code){return code;}:(eval)))(\"local=42\");answer=local;}probe(1);","answer":{"type":"number","value":1},"post":"indirect-conditional"},
+  {"partition":"P-R2-05","id":"constant-fold:parameter","pass":"constantFold","source":"(function(eval,local){(true?eval:function(code){return code;})(\"local=42\");answer=local;})(eval,1);","answer":{"type":"number","value":1},"post":"indirect-conditional"},
+  {"partition":"P-R2-05","id":"constant-fold:ordinary","pass":"constantFold","source":"function probe(local){const eval=function(code){return code;};(true?eval:function(code){return code;})(\"local=42\");answer=local;}probe(1);","answer":{"type":"number","value":1},"post":"no-conditional"},
+  {"partition":"P-R2-05","id":"constant-fold:optional","pass":"constantFold","source":"function probe(local){(true?eval:function(code){return code;})?.(\"local=42\");answer=local;}probe(1);","answer":{"type":"number","value":1},"post":"optional-selected"},
+  {"partition":"P-R2-05","id":"dead-code-eliminate:conditional","pass":"deadCodeEliminate","source":"function probe(local){(true?eval:function(code){return code;})(\"local=42\");answer=local;}probe(1);","answer":{"type":"number","value":1},"post":"indirect-conditional"},
+  {"partition":"P-R2-05","id":"dead-code-eliminate:grouped","pass":"deadCodeEliminate","source":"function probe(local){((false?function(code){return code;}:(eval)))(\"local=42\");answer=local;}probe(1);","answer":{"type":"number","value":1},"post":"indirect-conditional"},
+  {"partition":"P-R2-05","id":"dead-code-eliminate:parameter","pass":"deadCodeEliminate","source":"(function(eval,local){(true?eval:function(code){return code;})(\"local=42\");answer=local;})(eval,1);","answer":{"type":"number","value":1},"post":"indirect-conditional"},
+  {"partition":"P-R2-05","id":"dead-code-eliminate:ordinary","pass":"deadCodeEliminate","source":"function probe(local){const eval=function(code){return code;};(true?eval:function(code){return code;})(\"local=42\");answer=local;}probe(1);","answer":{"type":"number","value":1},"post":"no-conditional"},
+  {"partition":"P-R2-05","id":"dead-code-eliminate:optional","pass":"deadCodeEliminate","source":"function probe(local){(true?eval:function(code){return code;})?.(\"local=42\");answer=local;}probe(1);","answer":{"type":"number","value":1},"post":"optional-selected"},
+  {"partition":"P-R2-06","id":"with-initializer","pass":"constantPropagate","source":"function probe(){with({value:2}){var value=1;}answer=value;}probe();","answer":{"type":"undefined"}},
+  {"partition":"P-R2-06","id":"with-setter","pass":"deadCodeEliminate","source":"function probe(){with({set value(x){events.push(x);}}){var value=7;}answer=1;}probe();","answer":{"type":"number","value":1},"events":{"type":"array","values":[{"type":"number","value":7}]}},
+  {"partition":"P-R2-06","id":"global-pattern","pass":"constantPropagate","source":"var value=1;({x:globalThis.value}={x:2});answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R2-06","id":"global-iteration","pass":"constantPropagate","source":"var value=1;for(globalThis.value of [2]){}answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R2-06","id":"global-array-alias","pass":"constantPropagate","source":"const values=[1];var alias=values;globalThis.alias[0]=2;answer=values[0];","answer":{"type":"number","value":2}},
+  {"partition":"P-R2-06","id":"global-storage","pass":"controlFlowObject","source":"var ops={text:\"x\"};globalThis.ops.text=\"y\";answer=ops.text;","answer":{"type":"string","value":"y"}},
+  {"partition":"P-R2-06","id":"global-write-control:update","pass":"constantPropagate","source":"function chooseKey(){return \"value\";}globalThis.value=0;let value=1;globalThis[chooseKey()]++;answer=value;","answer":{"type":"number","value":1},"post":"numeric"},
+  {"partition":"P-R2-07","id":"literal-pattern","pass":"semanticRename","source":"var _0xlen=[1].length;const {_0xlen:copy}=globalThis;answer=copy;","answer":{"type":"number","value":1}},
+  {"partition":"P-R2-07","id":"rest-pattern","pass":"semanticRename","source":"var _0xlen=[1].length;const {...copy}=globalThis;answer=copy._0xlen;","answer":{"type":"number","value":1}},
+  {"partition":"P-R2-07","id":"nested-pattern","pass":"semanticRename","source":"var _0xlen=[1].length;const {globalThis:{_0xlen:copy}}=globalThis;answer=copy;","answer":{"type":"number","value":1}},
+  {"partition":"P-R2-07","id":"declaration-pattern","pass":"deadCodeEliminate","source":"var hidden=42;const {hidden:copy}=globalThis;answer=copy;","answer":{"type":"number","value":42}},
+  {"partition":"P-R2-07","id":"storage-pattern","pass":"controlFlowObject","source":"var ops={text:\"x\"};const {ops:alias}=globalThis;answer=ops.text+alias.text;","answer":{"type":"string","value":"xx"}},
+  {"partition":"P-R2-07","id":"pattern-value-alias","pass":"constantPropagate","source":"var values=[1];const {values:alias}=globalThis;alias[0]=2;answer=values[0];","answer":{"type":"number","value":2}},
+  {"partition":"P-R2-07","id":"constructor-assignment","pass":"constantPropagate","source":"let value=1;var Constructor;({Function:Constructor}=globalThis);Constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R2-07","id":"literal-sibling-control","pass":"constantPropagate","source":"var observed=1;var safe=2;const {observed:copy}=globalThis;answer=safe;","answer":{"type":"number","value":2},"post":"numeric"},
+  {"partition":"P-R2-07","id":"lexical-control","pass":"constantPropagate","source":"let value=1;const {value:copy}=globalThis;answer=value;","answer":{"type":"number","value":1},"post":"numeric"},
+  {"partition":"P-R2-07","id":"eval-setter","pass":"constantPropagate","source":"let value=1;const sink={set apply(run){run(\"value=2\");}};({eval:sink.apply}=globalThis);answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R2-07","id":"escaped-code","pass":"constantPropagate","source":"let value=1;consume(globalThis);answer=value;","answer":{"type":"number","value":2},"frame":"consume","effects":["consume"]},
+  {"partition":"P-R2-07","id":"iterator-code","pass":"constantPropagate","source":"let value=1;const [copy]=globalThis;answer=value;","answer":{"type":"number","value":2},"frame":"iterator","effects":["iterator",{"type":"undefined"}]},
+  {"partition":"P-R2-07","id":"duplicate-root","pass":"constantPropagate","source":"let value=1;var {fake:root,globalThis:root}=globalThis;root.Function(\"value=2\")();answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R2-07","id":"escaped-local-control","pass":"constantPropagate","source":"function probe(){let value=1;consume(globalThis);answer=value;}probe();","answer":{"type":"number","value":1},"post":"numeric","frame":"consume","effects":["consume"]},
+  {"partition":"P-R2-07","id":"global-this-before-init","pass":"constantPropagate","source":"var value=1;globalThis.value=2;answer=value;var globalThis=function(){};","answer":{"type":"number","value":2}},
+  {"partition":"P-R2-07","id":"global-this-no-init","pass":"constantPropagate","source":"var value=1;var globalThis;globalThis.value=2;answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R2-07","id":"with-supplied-constructor","pass":"constantPropagate","source":"let value=1;with(external){Ctor(\"value=2\")();}answer=value;","answer":{"type":"number","value":2},"frame":"external","effects":[]},
+  {"partition":"P-R2-07","id":"with-lexical-root-control","pass":"constantPropagate","source":"var value=1;with(external){const globalThis={};globalThis.value=2;}answer=value;","answer":{"type":"number","value":1},"post":"numeric","frame":"external","effects":[]},
+  {"partition":"P-R2-08","id":"strict-value","pass":"astRename","source":"function outer(){var _0xlong=7;function child(_0xlong){\"use strict\";globalThis.answer=eval(\"typeof value\");}child(0);}outer();","answer":{"type":"string","value":"undefined"}},
+  {"partition":"P-R2-08","id":"strict-len","pass":"semanticRename","source":"function outer(){var _0xlong=[1].length;function child(_0xlong){\"use strict\";globalThis.answer=eval(\"typeof len\");}child(0);}outer();","answer":{"type":"string","value":"undefined"}},
+  {"partition":"P-R2-08","id":"hidden-candidate-control","pass":"semanticRename","source":"function outer(){var _0xlong=[1].length;function child(_0xlong,len){\"use strict\";globalThis.answer=eval(\"typeof len\");}child(0,9);}outer();","answer":{"type":"string","value":"number"},"post":"rename:_0xlong"},
+  {"partition":"P-R2-09","id":"initializer-shadow","pass":"constantPropagate","source":"function probe(undefined){const value=undefined;answer=value;}probe(7);","answer":{"type":"number","value":7}},
+];
+
+describe("runtime name resolution additions", () => {
+  it.each(runtimeBindingCases)("$partition $id preserves semantics and useful transforms", (row: any) => {
+    const before = row.frame ? observeRuntimeFrame(row.source, row.frame) : observe(row.source);
+    const output = runPass(row.pass, row.source);
+    const after = row.frame ? observeRuntimeFrame(output.code, row.frame) : observe(output.code);
+    record("addition-" + row.partition + "-" + row.id.replaceAll(":", "-"), {source: row.source, code: output.code, before, after, post: row.post});
+    expect(before.completion.kind, "source completion").toBe(row.error ? "throw" : "normal");
+    if (row.error) expect(before.completion.name, "source abrupt completion").toBe(row.error);
+    expect(before.globals.answer, "source answer presence and value").toEqual(row.answer);
+    if (row.frame) expect(before.effects, "source effects").toEqual(row.effects);
+    else {
+      expect(before.globals.events, "source effects").toEqual(row.events ?? encode([]));
+      expect(before.stdout).toBe(""); expect(before.stderr).toBe("");
+    }
+    expect(after).toEqual(before);
+    if (row.post) expectRuntimePostcondition(output.ast, row.post);
+  });
+
+  it.each([{"id":"import","source":"globalThis.answer=eval(\"typeof hidden\");throw new Error(\"sentinel\");import {sep as hidden} from \"node:path\";","answer":{"type":"string","value":"string"}},{"id":"export-var","source":"eval(\"hidden=42\");globalThis.answer=hidden;throw new Error(\"sentinel\");export var hidden;","answer":{"type":"number","value":42}},{"id":"export-function","source":"globalThis.answer=eval(\"hidden()\");throw new Error(\"sentinel\");export function hidden(){return 42;}","answer":{"type":"number","value":42}},{"id":"export-default-named-function","source":"globalThis.answer=eval(\"hidden()\");throw new Error(\"sentinel\");export default function hidden(){return 42;}","answer":{"type":"number","value":42}}] as any[])("P-R2-01 module $id retains instantiated bindings", (row: any) => {
+    const execute = (code: string): any => {
+      const prefix = 'globalThis.events=[];process.on("uncaughtException",error=>{process.stdout.write(JSON.stringify({completion:{name:error.name,message:error.message},answer:Object.hasOwn(globalThis,"answer")?{type:typeof globalThis.answer,value:globalThis.answer}:{type:"absent"},events:globalThis.events}));});';
+      const result = spawnSync(process.execPath, ["--input-type=module", "--eval", prefix + code], {cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 5000});
+      expect(result.error).toBeUndefined(); expect(result.signal).toBe(null); expect(result.status).toBe(0); expect(result.stderr).toBe("");
+      return JSON.parse(result.stdout);
+    };
+    const output = runPass("deadCodeEliminate", row.source);
+    const before = execute(row.source), after = execute(output.code);
+    record("addition-module-" + row.id, {source: row.source, code: output.code, before, after});
+    expect(before).toEqual({completion: {name: "Error", message: "sentinel"}, answer: row.answer, events: []});
+    expect(after).toEqual(before);
+  });
+});

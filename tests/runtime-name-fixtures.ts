@@ -130,4 +130,5 @@ export const productionFixtures = [
   ...witnesses,
   {id: "proxy-parameter", source: 'var _0xops={call:function(_0xfn,_0xcode){return _0xfn(_0xcode);}};function probe(local){_0xops.call(eval,"local=42");globalThis.answer=local;}probe(1);'},
   {id: "proxy-inactive", source: 'var ops={call:function(fn,code){return fn(code);}};function probe(local){ops.call(eval,"local=42");globalThis.answer=local;}probe(1);'},
+  {id: "hoisted-var-after-return", source: 'function probe(){"use strict";eval("hidden=42");globalThis.answer=hidden;return;var hidden;}probe();'},
 ];
