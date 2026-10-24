@@ -35,16 +35,16 @@ describe("runtime name resolution", () => {
     babel.traverse(ast, {FunctionDeclaration(path: any) {if (["left", "right"].includes(path.node.id?.name)) bindings[path.node.id.name] = path.scope.getBinding("linked");}});
     expect(bindings.left).toBeDefined(); expect(bindings.right).toBeDefined();
     expect(bindings.left).not.toBe(bindings.right);
-    const linked = facts.annexBLinkedBindings(ast);
+    const linked = facts.runtimeNameFacts(ast).linked;
     expect(linked.has(bindings.left)).toBe(true); expect(linked.has(bindings.right)).toBe(false);
-    const owners = facts.annexBRetainedFunctionOwners(ast).get("linked");
+    const owners = facts.runtimeNameFacts(ast).owners.get("linked");
     expect([...owners].map((owner: any) => owner.node.id.name)).toEqual(["left"]);
   });
 
   it("exposed fact answers survive attempted result mutation", () => {
     const ast = parser.parse('function owner(){var linked=0;{function linked(){}}return linked;}');
-    const linked = facts.annexBLinkedBindings(ast);
-    const owners = facts.annexBRetainedFunctionOwners(ast);
+    const linked = facts.runtimeNameFacts(ast).linked;
+    const owners = facts.runtimeNameFacts(ast).owners;
     const members = [...linked], ownerMembers = [...owners.get("linked")];
     expect(members.length).toBe(1); expect(ownerMembers.length).toBe(1);
     const attempts: any[] = [];
@@ -54,9 +54,14 @@ describe("runtime name resolution", () => {
     record("fact-mutation", {attempts, linkedAfter: linked.size, ownersAfter: owners.size});
     expect([...linked]).toEqual(members);
     expect([...owners.get("linked") ?? []]).toEqual(ownerMembers);
-    expect([...facts.annexBLinkedBindings(ast)]).toEqual(members);
+    expect([...facts.runtimeNameFacts(ast).linked]).toEqual(members);
   });
 
+  it("P-R3-02 exposes only the unified runtime-name fact surface", () => {
+    expect(facts.runtimeNameFacts).toBeTypeOf("function");
+    expect("annexBLinkedBindings" in facts).toBe(false);
+    expect("annexBRetainedFunctionOwners" in facts).toBe(false);
+  });
   it("direct eval protects reachable ancestors, strict writes and nonliteral source", () => {
     preserve("eval-reachability", "constantPropagate", [
       {id:"parenthesized",source:'function probe(){var value=1;(eval)("value=42");answer=value;}probe();',answer:42},
@@ -370,6 +375,14 @@ const runtimeBindingCases: any[] = [
   {"partition":"P-R2-03","id":"discard-Function-semantic-rename","pass":"semanticRename","source":"var _0xlen=[1].length;void Function;answer=_0xlen;","answer":{"type":"number","value":1},"post":"rename:_0xlen"},
   {"partition":"P-R2-03","id":"discard-Function-dead-code-eliminate","pass":"deadCodeEliminate","source":"var hidden=42;void Function;answer=1;","answer":{"type":"number","value":1},"post":"clean-hidden"},
   {"partition":"P-R2-03","id":"discard-Function-control-flow-object","pass":"controlFlowObject","source":"var ops={text:\"x\"};void Function;answer=ops.text;","answer":{"type":"string","value":"x"},"post":"no-storage"},
+  {"partition":"P-R3-01","id":"bare-eval-constant-propagate","pass":"constantPropagate","source":"var value=1;eval;answer=value;","answer":{"type":"number","value":1},"post":"numeric"},
+  {"partition":"P-R3-01","id":"bare-eval-semantic-rename","pass":"semanticRename","source":"var _0xlen=[1].length;eval;answer=_0xlen;","answer":{"type":"number","value":1},"post":"rename:_0xlen"},
+  {"partition":"P-R3-01","id":"bare-eval-dead-code-eliminate","pass":"deadCodeEliminate","source":"var hidden=42;eval;answer=1;","answer":{"type":"number","value":1},"post":"clean-hidden"},
+  {"partition":"P-R3-01","id":"bare-eval-control-flow-object","pass":"controlFlowObject","source":"var ops={value:1};eval;answer=ops.value;","answer":{"type":"number","value":1},"post":"no-storage"},
+  {"partition":"P-R3-01","id":"bare-Function-constant-propagate","pass":"constantPropagate","source":"var value=1;Function;answer=value;","answer":{"type":"number","value":1},"post":"numeric"},
+  {"partition":"P-R3-01","id":"bare-Function-semantic-rename","pass":"semanticRename","source":"var _0xlen=[1].length;Function;answer=_0xlen;","answer":{"type":"number","value":1},"post":"rename:_0xlen"},
+  {"partition":"P-R3-01","id":"bare-Function-dead-code-eliminate","pass":"deadCodeEliminate","source":"var hidden=42;Function;answer=1;","answer":{"type":"number","value":1},"post":"clean-hidden"},
+  {"partition":"P-R3-01","id":"bare-Function-control-flow-object","pass":"controlFlowObject","source":"var ops={value:1};Function;answer=ops.value;","answer":{"type":"number","value":1},"post":"no-storage"},
   {"partition":"P-R2-03","id":"invoked-eval","pass":"constantPropagate","source":"var value=1;(0,eval)(\"value=2\");answer=value;","answer":{"type":"number","value":2}},
   {"partition":"P-R2-03","id":"escaped-eval","pass":"constantPropagate","source":"var value=1;[ eval ].forEach(fn=>fn(\"value=2\"));answer=value;","answer":{"type":"number","value":2}},
   {"partition":"P-R2-03","id":"invoked-Function","pass":"constantPropagate","source":"var value=1;Function(\"value=2\")();answer=value;","answer":{"type":"number","value":2}},
