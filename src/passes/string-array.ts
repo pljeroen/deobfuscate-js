@@ -283,7 +283,7 @@ function detectPattern(ast: File, source?: string): StringArrayPattern | null {
       // so do NOT also add to aliasDefs (would cause duplicate declaration error).
       const parentFn = path.findParent(
         p => t.isFunctionDeclaration(p.node) || t.isFunctionExpression(p.node) ||
-             t.isArrowFunctionExpression(p.node),
+             t.isArrowFunctionExpression(p.node) || t.isClassMethod(p.node),
       );
       if (!parentFn) {
         const declStmt = path.parentPath;
@@ -473,7 +473,7 @@ function removeAliasDeclarations(ast: File, pattern: StringArrayPattern): void {
       // since all their calls have been inlined.
       const enclosingFn = path.findParent(
         p => t.isFunctionDeclaration(p.node) || t.isFunctionExpression(p.node) ||
-             t.isArrowFunctionExpression(p.node),
+             t.isArrowFunctionExpression(p.node) || t.isClassMethod(p.node),
       );
       if (!enclosingFn) return; // top-level — handled by removeSetupStatements
 
