@@ -449,6 +449,7 @@ const runtimeBindingCases: any[] = [
   {"partition":"P-R10-01","id":"callable-uncertain-conditional-own-constructor","pass":"constantPropagate","source":"const f=function(){};if(globalThis.flag)f.constructor=function(){return function(){}};var value=1;f.constructor(\"value=2\")();globalThis.answer=value;","answer":{"type":"number","value":2}},
   {"partition":"P-R10-01","id":"callable-delete-inherited-constructor","pass":"constantPropagate","source":"const f=function(){};delete f.constructor;var value=1;f.constructor(\"value=2\")();globalThis.answer=value;","answer":{"type":"number","value":2}},
   {"partition":"P-R10-02","id":"callable-own-constructor-write-after-access-control","pass":"constantPropagate","source":"const f=function(){};var value=1;f.constructor(\"value=2\")();f.constructor=function(){return function(){}};globalThis.answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R11-01","id":"callable-own-constructor-assignment-then-delete","pass":"constantPropagate","source":"const f=function(){};f.constructor=function(){return function(){}};delete f.constructor;var value=1;f.constructor(\"value=2\")();globalThis.answer=value;","answer":{"type":"number","value":2}},
 ];
 
 describe("runtime name resolution additions", () => {
