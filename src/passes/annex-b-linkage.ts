@@ -162,6 +162,17 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
 
   // A may-origin relation, including reassigned aliases: uncertainty never proves independence.
   const EVAL = 1, CONSTRUCTOR = 2, ROOT = 4, CREATED = 8, CALLABLE = 16;
+  const definitelyPrecedes = (operation: any, access: any): boolean => {
+    const statement = operation.parentPath;
+    let accessPosition = access;
+    while (accessPosition.parentPath && !accessPosition.parentPath.isStatement())
+      accessPosition = accessPosition.parentPath;
+    const accessStatement = accessPosition.parentPath;
+    if (!statement || !accessStatement || statement.parentPath !== accessStatement.parentPath
+      || !(statement.parentPath.isProgram() || statement.parentPath.isBlockStatement())) return false;
+    return typeof statement.key === "number" && typeof accessStatement.key === "number"
+      && statement.key < accessStatement.key;
+  };
   const hasOwnConstructorOverride = (node: any, lookupSite: any, accessSite = lookupSite,
     seen = new Set<any>()): boolean => {
     if (!t.isIdentifier(node)) return false;
@@ -173,9 +184,14 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
       if (!(member?.isMemberExpression() || member?.isOptionalMemberExpression())
         || member.node.object !== reference.node
         || propertyName(member.node.property, member.node.computed) !== "constructor"
-        || !isWriteTarget(member)) continue;
-      if (typeof member.node.end !== "number" || typeof accessStart !== "number"
-        || member.node.end <= accessStart) return true;
+        || typeof member.node.end !== "number" || typeof accessStart !== "number"
+        || member.node.end > accessStart) continue;
+      const assignment = member.parentPath;
+      if (assignment?.isAssignmentExpression({ operator: "=" })
+        && assignment.node.left === member.node
+        && assignment.parentPath?.isExpressionStatement()
+        && assignment.parentPath.node.expression === assignment.node
+        && definitelyPrecedes(assignment, accessSite)) return true;
     }
     if (!binding.path.isVariableDeclarator() || !binding.path.node.init) return false;
     const next = new Set(seen); next.add(binding);
