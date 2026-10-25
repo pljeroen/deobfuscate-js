@@ -161,7 +161,26 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
     !computed && t.isIdentifier(key) ? key.name : t.isStringLiteral(key) ? key.value : null;
 
   // A may-origin relation, including reassigned aliases: uncertainty never proves independence.
-  const EVAL = 1, CONSTRUCTOR = 2, ROOT = 4, CREATED = 8;
+  const EVAL = 1, CONSTRUCTOR = 2, ROOT = 4, CREATED = 8, CALLABLE = 16;
+  const hasOwnConstructorOverride = (node: any, lookupSite: any, accessSite = lookupSite,
+    seen = new Set<any>()): boolean => {
+    if (!t.isIdentifier(node)) return false;
+    const binding = lookupSite.scope.getBinding(node.name);
+    if (!binding || seen.has(binding)) return false;
+    const accessStart = accessSite.node.start;
+    for (const reference of binding.referencePaths) {
+      const member = reference.parentPath;
+      if (!(member?.isMemberExpression() || member?.isOptionalMemberExpression())
+        || member.node.object !== reference.node
+        || propertyName(member.node.property, member.node.computed) !== "constructor"
+        || !isWriteTarget(member)) continue;
+      if (typeof member.node.end !== "number" || typeof accessStart !== "number"
+        || member.node.end <= accessStart) return true;
+    }
+    if (!binding.path.isVariableDeclarator() || !binding.path.node.init) return false;
+    const next = new Set(seen); next.add(binding);
+    return hasOwnConstructorOverride(binding.path.node.init, binding.path, accessSite, next);
+  };
   const origin = (node: any, site: any, seen = new Set<any>()): number => {
     if (!node) return 0;
     if (t.isParenthesizedExpression(node)) return origin(node.expression, site, seen);
@@ -198,21 +217,27 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
         || (!site.getFunctionParent() && binding.path.parentPath?.parentPath?.isProgram()
           && typeof binding.path.node.end === "number" && typeof site.node.start === "number"
           && binding.path.node.end <= site.node.start);
-      const ordinary = initialized && binding.constant && !cellWrites.has(binding) && !dynamicLookup(site, node.name)
-        && (binding.path.isFunctionDeclaration() || (binding.path.isVariableDeclarator()
-          && (t.isFunctionExpression(binding.path.node.init) || t.isArrowFunctionExpression(binding.path.node.init))));
+      const stable = initialized && binding.constant && !cellWrites.has(binding) && !dynamicLookup(site, node.name);
+      const ordinary = stable && (binding.path.isFunctionDeclaration() || (binding.path.isVariableDeclarator()
+        && (t.isFunctionExpression(binding.path.node.init) || t.isArrowFunctionExpression(binding.path.node.init))));
       const init = binding.path.isVariableDeclarator() ? binding.path.node.init : null;
+      const callable = stable && (binding.path.isFunctionDeclaration() || t.isFunctionExpression(init)
+        || t.isArrowFunctionExpression(init) || (t.isIdentifier(init) && !!(value & CALLABLE)));
       const distinctRoot = initialized && binding.constant && !cellWrites.has(binding)
         && (binding.path.isFunctionDeclaration() || t.isFunctionExpression(init) || t.isArrowFunctionExpression(init)
           || t.isObjectExpression(init) || t.isArrayExpression(init) || t.isClassExpression(init)
           || t.isLiteral(init) || t.isTemplateLiteral(init));
-      return value | (ordinary || distinctRoot ? 0 : named) | (rootSlot && !distinctRoot ? ROOT : 0);
+      return value | (callable ? CALLABLE : 0) | (ordinary || distinctRoot ? 0 : named)
+        | (rootSlot && !distinctRoot ? ROOT : 0);
     }
     if (t.isMemberExpression(node) || t.isOptionalMemberExpression(node)) {
       const key = propertyName(node.property, node.computed);
       if (key === "constructor" && (t.isFunctionExpression(node.object)
         || t.isArrowFunctionExpression(node.object) || t.isClassExpression(node.object))) return CONSTRUCTOR;
-      if (!(origin(node.object, site, seen) & ROOT)) return 0;
+      const objectOrigin = origin(node.object, site, seen);
+      if (key === "constructor" && (objectOrigin & CALLABLE)
+        && !hasOwnConstructorOverride(node.object, site)) return CONSTRUCTOR;
+      if (!(objectOrigin & ROOT)) return 0;
       return key === "eval" ? EVAL : key === "Function" ? CONSTRUCTOR : key === "globalThis" ? ROOT
         : key === null ? EVAL | CONSTRUCTOR | ROOT : 0;
     }
