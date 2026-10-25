@@ -138,4 +138,21 @@ export const productionFixtures = [
   {id: "proxy-parameter", source: 'var _0xops={call:function(_0xfn,_0xcode){return _0xfn(_0xcode);}};function probe(local){_0xops.call(eval,"local=42");globalThis.answer=local;}probe(1);'},
   {id: "proxy-inactive", source: 'var ops={call:function(fn,code){return fn(code);}};function probe(local){ops.call(eval,"local=42");globalThis.answer=local;}probe(1);'},
   {id: "hoisted-var-after-return", source: 'function probe(){"use strict";eval("hidden=42");globalThis.answer=hidden;return;var hidden;}probe();'},
+  {id: "unsafe-class-method-decoder-alias", source: `var _0xa = ["return 1", "log", "ok"];
+(function (x) {
+  x.push(x.shift());
+})(_0xa);
+function _0xd(_0xi) {
+  return _0xa[_0xi];
+}
+const a = _0xd;
+(function () {}).constructor(_0xd(2))();
+class C {
+  m() {
+    const _0xb = a;
+    console[_0xb(0)](_0xb(1));
+  }
+}
+new C().m();
+`},
 ];
