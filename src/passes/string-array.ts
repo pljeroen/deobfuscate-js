@@ -473,7 +473,7 @@ function removeAliasDeclarations(ast: File, pattern: StringArrayPattern): void {
       // since all their calls have been inlined.
       const enclosingFn = path.findParent(
         p => t.isFunctionDeclaration(p.node) || t.isFunctionExpression(p.node) ||
-             t.isArrowFunctionExpression(p.node) || t.isClassMethod(p.node),
+             t.isArrowFunctionExpression(p.node),
       );
       if (!enclosingFn) return; // top-level — handled by removeSetupStatements
 
