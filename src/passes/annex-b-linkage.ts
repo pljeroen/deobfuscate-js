@@ -227,7 +227,7 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
         && (binding.path.isFunctionDeclaration() || t.isFunctionExpression(init) || t.isArrowFunctionExpression(init)
           || t.isObjectExpression(init) || t.isArrayExpression(init) || t.isClassExpression(init)
           || t.isLiteral(init) || t.isTemplateLiteral(init));
-      return value | (callable ? CALLABLE : 0) | (ordinary || distinctRoot ? 0 : named)
+      return (value & ~CALLABLE) | (callable ? CALLABLE : 0) | (ordinary || distinctRoot ? 0 : named)
         | (rootSlot && !distinctRoot ? ROOT : 0);
     }
     if (t.isMemberExpression(node) || t.isOptionalMemberExpression(node)) {
