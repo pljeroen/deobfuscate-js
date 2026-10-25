@@ -155,4 +155,10 @@ class C {
 }
 new C().m();
 `},
+  {id: "inherited-function-expression-alias", source: 'const callable=function(){};var value=1;callable.constructor("value=2")();answer=value;'},
+  {id: "inherited-arrow-function-alias", source: 'const callable=()=>{};var value=1;callable.constructor("value=2")();answer=value;'},
+  {id: "inherited-function-declaration-alias", source: 'function declared(){}const callable=declared;var value=1;callable.constructor("value=2")();answer=value;'},
+  {id: "callable-own-constructor-control", source: 'const callable=function(){};callable.constructor=function(){return function(){}};var value=1;callable.constructor("value=2")();answer=value;'},
+  {id: "reassigned-callable-constructor-control", source: 'let callable=function(){};callable={constructor:function(){return function(){}}};var value=1;callable.constructor("value=2")();answer=value;'},
+  {id: "ordinary-object-constructor-control", source: 'const ordinary={constructor:function(){return function(){}}};var value=1;ordinary.constructor("value=2")();answer=value;'},
 ];

@@ -440,6 +440,10 @@ const runtimeBindingCases: any[] = [
   {"partition":"P-R4-01","id":"inherited-constructor-generator","pass":"constantPropagate","source":"var value=1;(function*(){}).constructor(\"value=2\")().next();answer=value;","answer":{"type":"number","value":2}},
   {"partition":"P-R4-02","id":"own-function-constructor-control","pass":"constantPropagate","source":"const fn=function(){};fn.constructor=function(){return function(){};};var value=1;fn.constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":1},"post":"numeric"},
   {"partition":"P-R4-02","id":"object-constructor-control","pass":"constantPropagate","source":"var value=1;({constructor:function(){return function(){}}}).constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":1},"post":"numeric"},
+  {"partition":"P-R8-01","id":"inherited-function-expression-alias","pass":"constantPropagate","source":"const callable=function(){};var value=1;callable.constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R8-01","id":"inherited-arrow-function-alias","pass":"constantPropagate","source":"const callable=()=>{};var value=1;callable.constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R8-01","id":"inherited-function-declaration-alias","pass":"constantPropagate","source":"function declared(){}const callable=declared;var value=1;callable.constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":2}},
+  {"partition":"P-R8-02","id":"reassigned-callable-constructor-control","pass":"constantPropagate","source":"let callable=function(){};callable={constructor:function(){return function(){}}};var value=1;callable.constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":1},"post":"numeric"},
 ];
 
 describe("runtime name resolution additions", () => {
