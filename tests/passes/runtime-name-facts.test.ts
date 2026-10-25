@@ -444,6 +444,7 @@ const runtimeBindingCases: any[] = [
   {"partition":"P-R8-01","id":"inherited-arrow-function-alias","pass":"constantPropagate","source":"const callable=()=>{};var value=1;callable.constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":2}},
   {"partition":"P-R8-01","id":"inherited-function-declaration-alias","pass":"constantPropagate","source":"function declared(){}const callable=declared;var value=1;callable.constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":2}},
   {"partition":"P-R8-02","id":"reassigned-callable-constructor-control","pass":"constantPropagate","source":"let callable=function(){};callable={constructor:function(){return function(){}}};var value=1;callable.constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":1},"post":"numeric"},
+  {"partition":"P-R9-01","id":"reassigned-callable-alias-chain-control","pass":"constantPropagate","source":"const base=function(){};let callable=base;callable={constructor:function(){return function(){}}};var value=1;callable.constructor(\"value=2\")();answer=value;","answer":{"type":"number","value":1},"post":"numeric"},
 ];
 
 describe("runtime name resolution additions", () => {
