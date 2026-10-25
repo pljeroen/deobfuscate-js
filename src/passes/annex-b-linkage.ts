@@ -179,20 +179,31 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
     const binding = lookupSite.scope.getBinding(node.name);
     if (!binding || seen.has(binding)) return false;
     const accessStart = accessSite.node.start;
+    if (typeof accessStart !== "number") return false;
+    const operations: any[] = [];
     for (const reference of binding.referencePaths) {
       const member = reference.parentPath;
       if (!(member?.isMemberExpression() || member?.isOptionalMemberExpression())
         || member.node.object !== reference.node
         || propertyName(member.node.property, member.node.computed) !== "constructor"
-        || typeof member.node.end !== "number" || typeof accessStart !== "number"
+        || !isWriteTarget(member) || typeof member.node.end !== "number"
         || member.node.end > accessStart) continue;
-      const assignment = member.parentPath;
-      if (assignment?.isAssignmentExpression({ operator: "=" })
-        && assignment.node.left === member.node
-        && assignment.parentPath?.isExpressionStatement()
-        && assignment.parentPath.node.expression === assignment.node
-        && definitelyPrecedes(assignment, accessSite)) return true;
+      operations.push(member);
     }
+    operations.sort((left, right) => (left.node.start ?? 0) - (right.node.start ?? 0));
+    let own = false;
+    for (const member of operations) {
+      const operation = member.parentPath;
+      const direct = operation?.parentPath?.isExpressionStatement()
+        && operation.parentPath.node.expression === operation.node
+        && definitelyPrecedes(operation, accessSite);
+      if (direct && operation.isAssignmentExpression({ operator: "=" })
+        && operation.node.left === member.node) own = true;
+      else if (direct && operation.isUnaryExpression({ operator: "delete" })
+        && operation.node.argument === member.node) own = false;
+      else own = false;
+    }
+    if (operations.length) return own;
     if (!binding.path.isVariableDeclarator() || !binding.path.node.init) return false;
     const next = new Set(seen); next.add(binding);
     return hasOwnConstructorOverride(binding.path.node.init, binding.path, accessSite, next);
