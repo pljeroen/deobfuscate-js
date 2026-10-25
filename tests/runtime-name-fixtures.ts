@@ -161,4 +161,5 @@ new C().m();
   {id: "callable-own-constructor-control", source: 'const callable=function(){};callable.constructor=function(){return function(){}};var value=1;callable.constructor("value=2")();answer=value;'},
   {id: "reassigned-callable-constructor-control", source: 'let callable=function(){};callable={constructor:function(){return function(){}}};var value=1;callable.constructor("value=2")();answer=value;'},
   {id: "ordinary-object-constructor-control", source: 'const ordinary={constructor:function(){return function(){}}};var value=1;ordinary.constructor("value=2")();answer=value;'},
+  {id: "callable-uncertain-conditional-own-constructor", source: 'const f=function(){};if(globalThis.flag)f.constructor=function(){return function(){}};var value=1;f.constructor("value=2")();globalThis.answer=value;'},
 ];
