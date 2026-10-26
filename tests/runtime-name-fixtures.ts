@@ -94,7 +94,8 @@ export const witnesses = [
     "pass": "constantPropagate",
     "source": "function _0xhost() {\n  var _0xv = 1;\n  with ({ _0xv: 2 }) {\n    globalThis.answer = _0xv;\n  }\n}\n_0xhost();\n",
     "sha256": "fdaa22dfe02ce965366196b9dcc6c13ec4657103c57223d073f816e9481c81fb",
-    "answer": 2
+    "answer": 2,
+    "expectedWarnings": ["Parse error (recovered): 'with' in strict mode. (3:2)"]
   },
   {
     "id": "global-function",
@@ -164,7 +165,7 @@ new C().m();
   {id: "callable-uncertain-conditional-own-constructor", source: 'const f=function(){};if(globalThis.flag)f.constructor=function(){return function(){}};var value=1;f.constructor("value=2")();globalThis.answer=value;'},
   {id: "nested-delete-invoked-before-constructor-access", source: 'const f=function(){};function reset(){delete f.constructor;}f.constructor=function(){return function(){}};reset();var value=1;f.constructor("value=2")();globalThis.answer=value;'},
   {id: "object-constructor-route", source: 'var value=1;Object.constructor("value=2")();globalThis.answer=value;'},
-  {id: "array-pattern-intrinsic-eval", source: 'function probe(){const [eval]=[globalThis.eval];var value=1;eval("value=42");globalThis.answer=value;}probe();'},
+  {id: "array-pattern-intrinsic-eval", source: 'function probe(){const [eval]=[globalThis.eval];var value=1;eval("value=42");globalThis.answer=value;}probe();', expectedWarnings: ["Parse error (recovered): Binding 'eval' in strict mode. (1:24)"]},
   {id: "named-sloppy-bare-call", source: 'var value=1;function set(){this.value=2;}set();globalThis.answer=value;'},
   {id: "cfu-current-tree-reorder", source: 'var value=1;var _0xo="0|1".split("|"),_0xi=0;while(!![]){switch(_0xo[_0xi++]){case"1":var globalThis={};continue;case"0":globalThis.value=2;continue;}break;}answer=value;'},
   {id: "ineffective-script-global-undefined-initializer", source: 'var undefined=7;globalThis.answer=undefined;'},

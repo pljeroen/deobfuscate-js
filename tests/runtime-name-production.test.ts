@@ -49,15 +49,12 @@ for (const mode of modes) describe(mode+" production composition", () => {
     expect(typeof result.code).toBe("string");expect(result.code.length).toBeGreaterThan(0);
     const lines=result.stderr.split(/[\r\n]+/).filter(Boolean);
     expect(lines.filter((line: string) => line===NOTICE)).toHaveLength(mode==="unsafe"?1:0);
-    const messages=warnings(result.stderr);
-    if(fixture.id==="with-read") {
-      expect(messages.length).toBeGreaterThan(0);
-      expect(messages.every((message: string) => /^Parse error \(recovered\): 'with' in strict mode\. \(\d+:\d+\)$/.test(message))).toBe(true);
-    } else expect(messages).toEqual([]);
-    expect(lines.filter((line: string) => !line.startsWith("WARNING:"))).toEqual([]);
     const before=observe(fixture.source),after=observe(result.code);
     expect(before.completion.kind).toBe("normal");
     expect(after).toEqual(before);
+    const messages=warnings(result.stderr);
+    expect(messages).toEqual(fixture.expectedWarnings ?? []);
+    expect(lines.filter((line: string) => !line.startsWith("WARNING:"))).toEqual([]);
     if(fixture.id==="clean-sibling") expect(nodes(parser.parse(result.code),"VariableDeclarator").some((node: any) => node.id.name==="_0xlen")).toBe(false);
     if(fixture.id.startsWith("proxy-")) {
       const fp=fingerprint(parser.parse(fixture.source));
