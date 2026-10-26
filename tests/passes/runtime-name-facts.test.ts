@@ -484,3 +484,205 @@ describe("runtime name resolution additions", () => {
     expect(after).toEqual(before);
   });
 });
+
+const controlFlowUnflattenPassR12 = (await import(pathToFileURL(join(ROOT, "src", "passes", "control-flow-unflatten.ts")).href)).controlFlowUnflattenPass;
+const {existsSync: existsSyncR12, mkdtempSync: mkdtempSyncR12, readFileSync: readFileSyncR12, rmSync: rmSyncR12, writeFileSync: writeFileSyncR12} = await import("node:fs");
+const {tmpdir: tmpdirR12} = await import("node:os");
+
+type Revision12Case = {id: string; pass: string; source: string; answer: unknown};
+function executeRevision12Cases(name: string, rows: Revision12Case[]): any[] {
+  const results = rows.map(row => {
+    const before = observe(row.source);
+    const output = runPass(row.pass, row.source);
+    return {...row, before, code: output.code, after: observe(output.code)};
+  });
+  record(name, results);
+  expect(results.map(row => ({id: row.id, completion: row.before.completion.kind, answer: row.before.globals.answer}))).toEqual(
+    results.map(row => ({id: row.id, completion: "normal", answer: encode(row.answer)})),
+  );
+  expect(results.map(row => ({id: row.id, outcome: row.after}))).toEqual(
+    results.map(row => ({id: row.id, outcome: row.before})),
+  );
+  return results;
+}
+
+describe("runtime name resolution revision 12 boundaries", () => {
+  it("T200 P-R12-01 closes own-constructor state over activation and references", () => {
+    executeRevision12Cases("T200-P-R12-01", [
+      {id: "default-parameter-before-outer-assignment", pass: "constantPropagate", source: 'const f=function(){};var value=1;h();f.constructor=function(){return function(){}};function h(a=f.constructor("value=2")()){}globalThis.answer=value;', answer: 2},
+      {id: "hoisted-nested-delete", pass: "constantPropagate", source: 'const f=function(){};function reset(){delete f.constructor;}f.constructor=function(){return function(){}};reset();var value=1;f.constructor("value=2")();globalThis.answer=value;', answer: 2},
+      {id: "generator-suspension-delete", pass: "constantPropagate", source: 'const f=function(){};var value=1;function* gen(){f.constructor=function(){return function(){}};yield;f.constructor("value=2")();}const it=gen();it.next();delete f.constructor;it.next();globalThis.answer=value;', answer: 2},
+      {id: "immutable-alias-delete", pass: "constantPropagate", source: 'const f=function(){};const g=f;f.constructor=function(){return function(){}};delete g.constructor;var value=1;f.constructor("value=2")();globalThis.answer=value;', answer: 2},
+      {id: "escape-to-callee-delete", pass: "constantPropagate", source: 'const f=function(){};function reset(target){delete target.constructor;}f.constructor=function(){return function(){}};reset(f);var value=1;f.constructor("value=2")();globalThis.answer=value;', answer: 2},
+    ]);
+  });
+
+  it("T203 P-R12-02 retains exact constructor provenance across the enumerated receivers", () => {
+    executeRevision12Cases("T203-P-R12-02", [
+      {id: "script-var-read-in-function", pass: "constantPropagate", source: 'var callable=function(){};var value=1;function run(){callable.constructor("value=2")();}run();globalThis.answer=value;', answer: 2},
+      {id: "annex-b-owner-name", pass: "constantPropagate", source: '{function callable(){}}var value=1;callable.constructor("value=2")();globalThis.answer=value;', answer: 2},
+      {id: "duplicate-function-declaration", pass: "constantPropagate", source: 'function callable(){}function callable(){}var value=1;callable.constructor("value=2")();globalThis.answer=value;', answer: 2},
+      {id: "all-callable-reassignment", pass: "constantPropagate", source: 'let callable=function(){};callable=()=>{};var value=1;callable.constructor("value=2")();globalThis.answer=value;', answer: 2},
+      {id: "class-declaration", pass: "constantPropagate", source: 'class Callable{}var value=1;Callable.constructor("value=2")();globalThis.answer=value;', answer: 2},
+      {id: "sequence-alias", pass: "constantPropagate", source: 'const callable=(0,function(){});var value=1;callable.constructor("value=2")();globalThis.answer=value;', answer: 2},
+      {id: "callable-parameter", pass: "constantPropagate", source: 'var value=1;(function(callable){callable.constructor("value=2")();})(function(){});globalThis.answer=value;', answer: 2},
+      {id: "Object-constructor", pass: "constantPropagate", source: 'var value=1;Object.constructor("value=2")();globalThis.answer=value;', answer: 2},
+      {id: "array-constructor-chain", pass: "constantPropagate", source: 'var value=1;[].constructor.constructor("value=2")();globalThis.answer=value;', answer: 2},
+      {id: "bound-function", pass: "constantPropagate", source: 'const callable=(function(){}).bind(null);var value=1;callable.constructor("value=2")();globalThis.answer=value;', answer: 2},
+      {id: "call-result-callable", pass: "constantPropagate", source: 'function factory(){return function(){}}const callable=factory();var value=1;callable.constructor("value=2")();globalThis.answer=value;', answer: 2},
+      {id: "own-Object-constructor", pass: "constantPropagate", source: 'const callable=function(){};callable.constructor=Object.constructor;var value=1;callable.constructor("value=2")();globalThis.answer=value;', answer: 2},
+      {id: "optional-exact-access", pass: "constantPropagate", source: 'const callable=function(){};var value=1;callable.constructor?.("value=2")();globalThis.answer=value;', answer: 2},
+      {id: "new-exact-access", pass: "constantPropagate", source: 'const callable=function(){};var value=1;new (callable.constructor("value=2"))();globalThis.answer=value;', answer: 2},
+      {id: "stored-exact-access", pass: "constantPropagate", source: 'const callable=function(){};const Constructor=callable.constructor;var value=1;Constructor("value=2")();globalThis.answer=value;', answer: 2},
+    ]);
+  });
+
+  it("T206 P-R12-03 preserves intrinsic eval through array and object patterns", () => {
+    executeRevision12Cases("T206-P-R12-03", [
+      {id: "array-constant-propagate", pass: "constantPropagate", source: 'function probe(){const [eval]=[globalThis.eval];var value=1;eval("value=42");globalThis.answer=value;}probe();', answer: 42},
+      {id: "array-ast-rename", pass: "astRename", source: 'function probe(){const [eval]=[globalThis.eval];var _0xv=1;eval("_0xv=42");globalThis.answer=_0xv;}probe();', answer: 42},
+      {id: "array-dead-code-eliminate", pass: "deadCodeEliminate", source: 'function probe(){const [eval]=[globalThis.eval];var hidden=42;eval("globalThis.answer=hidden");}probe();', answer: 42},
+      {id: "object-constant-propagate", pass: "constantPropagate", source: 'function probe(){const {intrinsic:eval}={intrinsic:globalThis.eval};var value=1;eval("value=42");globalThis.answer=value;}probe();', answer: 42},
+      {id: "object-ast-rename", pass: "astRename", source: 'function probe(){const {intrinsic:eval}={intrinsic:globalThis.eval};var _0xv=1;eval("_0xv=42");globalThis.answer=_0xv;}probe();', answer: 42},
+      {id: "object-dead-code-eliminate", pass: "deadCodeEliminate", source: 'function probe(){const {intrinsic:eval}={intrinsic:globalThis.eval};var hidden=42;eval("globalThis.answer=hidden");}probe();', answer: 42},
+    ]);
+  });
+
+  it("T207 P-R12-03 preserves ordinary destructured eval controls", () => {
+    executeRevision12Cases("T207-P-R12-03-control", [
+      {id: "array-ordinary-function", pass: "constantPropagate", source: 'function probe(){const [eval]=[function(code){return code;}];var value=1;eval("value=42");globalThis.answer=value;}probe();', answer: 1},
+      {id: "object-ordinary-function", pass: "constantPropagate", source: 'function probe(){const {ordinary:eval}={ordinary:function(code){return code;}};var value=1;eval("value=42");globalThis.answer=value;}probe();', answer: 1},
+    ]);
+  });
+
+  it("T210 P-R12-04 retains bounded receiver-less sloppy-this roots", () => {
+    executeRevision12Cases("T210-P-R12-04", [
+      {id: "direct-sloppy-iife", pass: "constantPropagate", source: 'var value=1;(function(){this.value=2;})();globalThis.answer=value;', answer: 2},
+      {id: "named-sloppy-bare-call", pass: "constantPropagate", source: 'var value=1;function set(){this.value=2;}set();globalThis.answer=value;', answer: 2},
+      {id: "returned-sloppy-this", pass: "constantPropagate", source: 'var value=1;(function(){return this;})().value=2;globalThis.answer=value;', answer: 2},
+      {id: "sloppy-this-eval", pass: "constantPropagate", source: 'var value=1;(function(){this.eval("value=2");})();globalThis.answer=value;', answer: 2},
+    ]);
+  });
+
+  it("T211 P-R12-04 preserves strict, module, member, class, and constructor controls", () => {
+    const scriptRows = [
+      {id: "strict-function", pass: "constantPropagate", source: 'var value=1;(function(){"use strict";if(this) this.value=2;})();globalThis.answer=value;', answer: 1},
+      {id: "object-method", pass: "constantPropagate", source: 'var value=1;const object={set(){this.value=2;}};object.set();globalThis.answer=value;', answer: 1},
+      {id: "class-method", pass: "constantPropagate", source: 'var value=1;class C{set(){this.value=2;}}new C().set();globalThis.answer=value;', answer: 1},
+      {id: "constructor-call", pass: "constantPropagate", source: 'var value=1;new (function(){this.value=2;})();globalThis.answer=value;', answer: 1},
+    ];
+    const scriptResults = scriptRows.map(row => {
+      const before = observe(row.source);
+      const output = runPass(row.pass, row.source);
+      return {...row, before, code: output.code, after: observe(output.code)};
+    });
+    const moduleSource = 'var value=1;(function(){globalThis.answer=this===undefined?value:9;})();export{};';
+    const moduleOutput = runPass("constantPropagate", moduleSource).code;
+    const executeModule = (source: string): any => {
+      const result = spawnSync(process.execPath, ["--input-type=module", "--eval", source + ';process.stdout.write(JSON.stringify(globalThis.answer));'], {cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 5000});
+      return {error: result.error?.message, signal: result.signal, status: result.status, stdout: result.stdout, stderr: result.stderr};
+    };
+    const moduleBefore = executeModule(moduleSource);
+    const moduleAfter = executeModule(moduleOutput);
+    record("T211-P-R12-04-control", {scriptResults, module: {source: moduleSource, code: moduleOutput, before: moduleBefore, after: moduleAfter}});
+    expect(scriptResults.map(row => ({id: row.id, completion: row.before.completion.kind, answer: row.before.globals.answer}))).toEqual(
+      scriptResults.map(row => ({id: row.id, completion: "normal", answer: encode(row.answer)})),
+    );
+    expect(scriptResults.map(row => ({id: row.id, outcome: row.after}))).toEqual(scriptResults.map(row => ({id: row.id, outcome: row.before})));
+    expect(moduleBefore).toEqual({error: undefined, signal: null, status: 0, stdout: "1", stderr: ""});
+    expect(moduleAfter).toEqual(moduleBefore);
+  });
+
+  it("T214 P-R12-05 retains a constructor key exposed within constant propagation", () => {
+    executeRevision12Cases("T214-P-R12-05", [
+      {id: "same-pass-computed-constructor", pass: "constantPropagate", source: 'const callable=function(){};const key="constructor";var value=1;callable[key]("value=2")();globalThis.answer=value;', answer: 2},
+    ]);
+  });
+
+  it("T215 P-R12-05 composes control-flow unflattening, DCE, and propagation on one AST", () => {
+    const source = 'var value=1;var _0xo="0|1".split("|"),_0xi=0;while(!![]){switch(_0xo[_0xi++]){case"1":var globalThis={};continue;case"0":globalThis.value=2;continue;}break;}answer=value;';
+    const before = observe(source);
+    const ast = parser.parse(source);
+    controlFlowUnflattenPassR12.run(ast, source);
+    passes.deadCodeEliminate.run(ast, source);
+    passes.constantPropagate.run(ast, source);
+    const code = parser.generate(ast);
+    const after = observe(code);
+    record("T215-P-R12-05", {source, code, before, after});
+    expect(before.completion.kind).toBe("normal");
+    expect(before.globals.answer).toEqual(encode(2));
+    expect(after).toEqual(before);
+  });
+
+  it("T216 P-R12-05 preserves the equivalent current-tree-order control", () => {
+    executeRevision12Cases("T216-P-R12-05-control", [
+      {id: "current-tree-order", pass: "constantPropagate", source: 'var value=1;globalThis.value=2;var globalThis={};answer=value;', answer: 2},
+    ]);
+  });
+
+  it("T219 P-R12-06 preserves cyclic and joining eval-origin unions", () => {
+    executeRevision12Cases("T219-P-R12-06-control", [
+      {id: "cyclic-joining-eval-origin", pass: "constantPropagate", source: 'let first=eval;let second=first;let joined=function(code){return code;};joined=second;first=joined;second=first;var value=1;second("value=2");globalThis.answer=value;', answer: 2},
+    ]);
+  });
+
+  it("T220 P-R12-06 completes the deterministic n24 alias DAG through the installed default CLI", () => {
+    const source = ["var v0=0;", "var v1=v0;"].concat(Array.from({length: 23}, (_unused, index) => {
+      const current = index + 2;
+      return "var v" + current + "=v" + (current - 1) + ";v" + current + "=v" + (current - 2) + ";";
+    }), ["globalThis.answer=typeof v24;"]).join("\n") + "\n";
+    const directory = mkdtempSyncR12(join(tmpdirR12(), "cf07-t220-"));
+    const input = join(directory, "input.js");
+    const output = join(directory, "output.js");
+    try {
+      writeFileSyncR12(input, source);
+      const before = observe(source);
+      const started = Date.now();
+      const result = spawnSync(process.execPath, ["--import", "tsx", "src/index.ts", input, output], {
+        cwd: ROOT,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 5000,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      const elapsedMs = Date.now() - started;
+      const code = existsSyncR12(output) ? readFileSyncR12(output, "utf8") : null;
+      const after = code === null ? null : observe(code);
+      const evidence = {
+        source,
+        source_sha256: hash(source),
+        child_deadline_ms: 5000,
+        elapsed_ms: elapsedMs,
+        result: {error: result.error?.message, exit: result.status, signal: result.signal, stdout: result.stdout, stderr: result.stderr},
+        output_sha256: code === null ? null : hash(code),
+        before,
+        after,
+      };
+      record("T220-P-R12-06", evidence);
+      expect(before.completion.kind).toBe("normal");
+      expect(before.globals.answer).toEqual(encode("number"));
+      expect(result.error, "child deadline or spawn error").toBeUndefined();
+      expect(result.signal, "child signal").toBe(null);
+      expect(result.status, "child exit").toBe(0);
+      expect(code, "installed CLI output").not.toBeNull();
+      expect(after, "parsed output runtime observation").toEqual(before);
+    } finally {
+      rmSyncR12(directory, {recursive: true, force: true});
+    }
+  }, 15000);
+
+  it("T221 P-R12-07 declines ineffective script-global special-name initializers", () => {
+    executeRevision12Cases("T221-P-R12-07", [
+      {id: "script-global-undefined", pass: "constantPropagate", source: 'var undefined=7;globalThis.answer=undefined;', answer: undefined},
+      {id: "script-global-NaN", pass: "constantPropagate", source: 'var NaN=1;globalThis.answer=NaN;', answer: NaN},
+      {id: "script-global-Infinity", pass: "constantPropagate", source: 'var Infinity=1;globalThis.answer=Infinity;', answer: Infinity},
+    ]);
+  });
+
+  it("T222 P-R12-07 preserves local and ordinary-name propagation controls", () => {
+    executeRevision12Cases("T222-P-R12-07-control", [
+      {id: "function-local-undefined", pass: "constantPropagate", source: 'function probe(){var undefined=7;globalThis.answer=undefined;}probe();', answer: 7},
+      {id: "ordinary-script-global", pass: "constantPropagate", source: 'var ordinary=7;globalThis.answer=ordinary;', answer: 7},
+    ]);
+  });
+});
