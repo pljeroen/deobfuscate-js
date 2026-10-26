@@ -174,4 +174,5 @@ new C().m();
   {id: "object-computed-constructor-key", source: 'var hidden=1;var k="constructor";Object[k]("hidden=2")();globalThis.answer=hidden;'},
   {id: "destructured-eval-later-spread", source: '(function(){var hidden=1;var src={eval:globalThis.eval};var {eval}={eval:function(s){return s;},...src};eval("hidden=42");globalThis.answer=hidden;})();', expectedWarnings: ["Parse error (recovered): Binding 'eval' in strict mode. (1:61)"]},
   {id: "named-sloppy-optional-call", source: 'var hidden=1;function f(){this.hidden=2;}f?.();globalThis.answer=hidden;'},
+  {id: "same-statement-receiver-pass-own-constructor", source: "var hidden=1;let o=function(){};o.constructor=function(){return function(){}};function strip(x){delete x.constructor;}strip(o),o.constructor(\"hidden=2\")();globalThis.answer=hidden;"},
 ];

@@ -785,3 +785,46 @@ describe("runtime name resolution revision 14 corrections", () => {
     expect({rows: revision14Actual(results), module: moduleControl.after}).toEqual({rows: revision14Expected(results), module: moduleControl.before});
   });
 });
+
+
+describe("runtime name resolution constructor access ordering", () => {
+  it("T240 C15-01 retains constructor hazards for unordered receiver references", () => {
+    const results = collectRevision14Cases("T240-C15-01-runtime", [
+      {
+            "id": "same-expression-receiver-pass",
+            "source": "var hidden=1;let o=function(){};o.constructor=function(){return function(){}};function strip(x){delete x.constructor;}strip(o),o.constructor(\"hidden=2\")();globalThis.answer=hidden;",
+            "answer": 2
+      },
+      {
+            "id": "compound-statement-containment",
+            "source": "var hidden=1;let o=function(){};o.constructor=function(){return function(){}};function strip(x){delete x.constructor;}switch(0){case 0:strip(o);o.constructor(\"hidden=2\")();}globalThis.answer=hidden;",
+            "answer": 2
+      },
+      {
+            "id": "separate-earlier-statement-pass",
+            "source": "var hidden=1;let o=function(){};o.constructor=function(){return function(){}};function strip(x){delete x.constructor;}strip(o);o.constructor(\"hidden=2\")();globalThis.answer=hidden;",
+            "answer": 2
+      },
+      {
+            "id": "direct-fresh-local-safe-own",
+            "source": "function probe(){const f=function(){};f.constructor=function(){return function(){}};var value=1;f.constructor(\"value=2\")();globalThis.answer=value;}probe();",
+            "answer": 1,
+            "post": "numeric"
+      }
+]);
+    const observations = results.map(row => ({
+      id: row.id,
+      before: row.before,
+      after: row.after,
+      sourceWarnings: parser.parseWithDiagnostics(row.source).warnings,
+      transformedWarnings: parser.parseWithDiagnostics(row.code).warnings,
+      postcondition: row.postcondition,
+    }));
+    const expected = results.map(row => {
+      const outcome = {completion: {kind: "normal"}, globals: {answer: encode(row.answer), side: {type: "absent"}, events: encode([])}, stdout: "", stderr: ""};
+      return {id: row.id, before: outcome, after: outcome, sourceWarnings: [], transformedWarnings: [], postcondition: true};
+    });
+    record("T240-C15-01-complete", {observations, expected});
+    expect(observations).toEqual(expected);
+  });
+});
