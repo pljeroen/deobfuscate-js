@@ -686,3 +686,102 @@ describe("runtime name resolution revision 12 boundaries", () => {
     ]);
   });
 });
+
+type Revision14Case = {id: string; source: string; answer: unknown; post?: "numeric"};
+function collectRevision14Cases(name: string, rows: Revision14Case[]): any[] {
+  const results = rows.map(row => {
+    const before = observe(row.source);
+    const output = runPass("constantPropagate", row.source);
+    const answer = nodes(output.ast, "AssignmentExpression").find((node: any) => node.left.name === "answer" || node.left.property?.name === "answer");
+    return {...row, before, code: output.code, after: observe(output.code), postcondition: row.post === "numeric" ? answer?.right.type === "NumericLiteral" : true};
+  });
+  record(name, results);
+  return results;
+}
+
+function revision14Actual(results: any[]): any[] {
+  return results.map(row => ({id: row.id, sourceCompletion: row.before.completion.kind, sourceAnswer: row.before.globals.answer, transformed: row.after, postcondition: row.postcondition}));
+}
+
+function revision14Expected(results: any[]): any[] {
+  return results.map(row => ({id: row.id, sourceCompletion: "normal", sourceAnswer: encode(row.answer), transformed: row.before, postcondition: true}));
+}
+
+function collectRevision14Module(name: string, source: string): any {
+  const code = runPass("constantPropagate", source).code;
+  const execute = (text: string): any => {
+    const result = spawnSync(process.execPath, ["--input-type=module", "--eval", text], {cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 5000});
+    return {error: result.error?.message, signal: result.signal, status: result.status, stdout: result.stdout, stderr: result.stderr};
+  };
+  const result = {name, source, code, before: execute(source), after: execute(code)};
+  record(name, result);
+  return result;
+}
+
+describe("runtime name resolution revision 14 corrections", () => {
+  it("T225 P-R14-01 declines ineffective script-global special-name writes in every propagation phase", () => {
+    const results = collectRevision14Cases("T225-P-R14-01", [
+      {id: "script-global-undefined-cross-branch-typeof", source: 'var undefined;var c=[1].length>0;if(c){undefined=1;}else{undefined=2;}globalThis.answer=typeof undefined;', answer: "undefined"},
+      {id: "script-global-NaN-cross-branch-typeof", source: 'var NaN;var c=[1].length>0;if(c){NaN="x";}else{NaN="y";}globalThis.answer=typeof NaN;', answer: "number"},
+      {id: "script-global-Infinity-cross-branch-typeof", source: 'var Infinity;var c=[1].length>0;if(c){Infinity=true;}else{Infinity=false;}globalThis.answer=typeof Infinity;', answer: "number"},
+      {id: "function-local-undefined-write", source: 'function probe(){var undefined;var c=[1].length>0;if(c){undefined=1;}else{undefined=2;}globalThis.answer=typeof undefined;}probe();', answer: "number"},
+      {id: "function-local-NaN-write", source: 'function probe(){var NaN;var c=[1].length>0;if(c){NaN="x";}else{NaN="y";}globalThis.answer=typeof NaN;}probe();', answer: "string"},
+      {id: "function-local-Infinity-write", source: 'function probe(){var Infinity;var c=[1].length>0;if(c){Infinity=true;}else{Infinity=false;}globalThis.answer=typeof Infinity;}probe();', answer: "boolean"},
+      {id: "ordinary-script-global-cross-branch", source: 'var ordinary;var c=[1].length>0;if(c){ordinary=1;}else{ordinary=2;}globalThis.answer=typeof ordinary;', answer: "number"},
+    ]);
+    const moduleControl = collectRevision14Module("T225-P-R14-01-module-control", 'var undefined;var c=[1].length>0;if(c){undefined=1;}else{undefined=2;}console.log(typeof undefined);export{};');
+    expect({rows: revision14Actual(results), module: moduleControl.after}).toEqual({rows: revision14Expected(results), module: moduleControl.before});
+  });
+
+  it("T228 P-R14-02 restricts safe own-constructor suppression to direct fresh-local state", () => {
+    const results = collectRevision14Cases("T228-P-R14-02", [
+      {id: "globalThis-root-write", source: 'var hidden=1;var x={constructor:{}};globalThis.x=function(){};x.constructor("hidden=2")();globalThis.answer=hidden;', answer: 2},
+      {id: "top-level-this-root-write", source: 'var hidden=1;var x={constructor:{}};this.x=function(){};x.constructor("hidden=2")();globalThis.answer=hidden;', answer: 2},
+      {id: "Annex-B-linked-root-write", source: 'var hidden=1;var x={constructor:{}};{function x(){}}x.constructor("hidden=2")();globalThis.answer=hidden;', answer: 2},
+      {id: "arrow-expression-body-access", source: 'const f=function(){};f.constructor=function(){return function(){}};const g=()=>f.constructor("value=2")();delete f.constructor;var value=1;g();globalThis.answer=value;', answer: 2},
+      {id: "class-field-initializer-access", source: 'const f=function(){};f.constructor=function(){return function(){}};class C{x=f.constructor("value=2")();}delete f.constructor;var value=1;new C();globalThis.answer=value;', answer: 2},
+      {id: "deferred-arrow-access", source: 'const f=function(){};var value=1;f.constructor=function(){return function(){}};const run=()=>f.constructor("value=2")();delete f.constructor;run();globalThis.answer=value;', answer: 2},
+      {id: "frozen-call-result-receiver-C20", source: 'const f=Object.freeze(function(){});var value=1;f.constructor=function(){return function(){}};f.constructor("value=2")();globalThis.answer=value;', answer: 2},
+      {id: "direct-fresh-function-safe-own-control", source: 'function probe(){const f=function(){};f.constructor=function(){return function(){}};var value=1;f.constructor("value=2")();globalThis.answer=value;}probe();', answer: 1, post: "numeric"},
+      {id: "direct-fresh-object-reassignment-control", source: 'function probe(){let f=function(){};f={constructor:function(){return function(){}}};var value=1;f.constructor("value=2")();globalThis.answer=value;}probe();', answer: 1, post: "numeric"},
+      {id: "immediate-safe-object-literal-control", source: 'var value=1;({constructor:function(){return function(){}}}).constructor("value=2")();globalThis.answer=value;', answer: 1, post: "numeric"},
+    ]);
+    expect(revision14Actual(results)).toEqual(revision14Expected(results));
+  });
+
+  it("T231 P-R14-03 retains constructor provenance across Phase-1 computed-key substitution", () => {
+    const results = collectRevision14Cases("T231-P-R14-03", [
+      {id: "Object-computed-key-substitution", source: 'var hidden=1;var k="constructor";Object[k]("hidden=2")();globalThis.answer=hidden;', answer: 2},
+      {id: "array-constructor-chain-key-substitution", source: 'var hidden=1;var k="constructor";[][k][k]("hidden=2")();globalThis.answer=hidden;', answer: 2},
+      {id: "known-exact-non-constructor-key-control", source: 'var hidden=1;var k="prototype";Object[k];globalThis.answer=hidden;', answer: 1},
+      {id: "ordinary-computed-data-access-control", source: 'const ordinary={value:2};var k="value";globalThis.answer=ordinary[k];', answer: 2},
+    ]);
+    expect(revision14Actual(results)).toEqual(revision14Expected(results));
+  });
+
+  it("T234 P-R14-04 selects destructured eval sources by literal evaluation semantics", () => {
+    const results = collectRevision14Cases("T234-P-R14-04", [
+      {id: "object-later-spread", source: '(function(){var hidden=1;var src={eval:globalThis.eval};var {eval}={eval:function(s){return s;},...src};eval("hidden=42");globalThis.answer=hidden;})();', answer: 42},
+      {id: "object-later-getter", source: '(function(){var hidden=1;var {eval}={eval:function(s){return s;},get eval(){return globalThis.eval;}};eval("hidden=42");globalThis.answer=hidden;})();', answer: 42},
+      {id: "object-later-unknown-computed-eval-key", source: '(function(){var hidden=1;var key="eval";var {eval}={eval:function(s){return s;},[key]:globalThis.eval};eval("hidden=42");globalThis.answer=hidden;})();', answer: 42},
+      {id: "array-earlier-spread", source: '(function(){var hidden=1;var [x,eval]=[...[0,globalThis.eval],function(s){return s;}];eval("hidden=42");globalThis.answer=hidden;})();', answer: 42},
+      {id: "object-earlier-spread-final-exact-ordinary-control", source: '(function(){var hidden=1;var src={eval:globalThis.eval};var {eval}={...src,eval:function(s){return s;}};eval("hidden=42");globalThis.answer=hidden;})();', answer: 1},
+      {id: "array-spread-after-selected-index-control", source: '(function(){var hidden=1;var [eval]=[function(s){return s;},...[globalThis.eval]];eval("hidden=42");globalThis.answer=hidden;})();', answer: 1},
+    ]);
+    expect(revision14Actual(results)).toEqual(revision14Expected(results));
+  });
+
+  it("T237 P-R14-05 retains receiver-less sloppy-this roots across exact invocation forms", () => {
+    const results = collectRevision14Cases("T237-P-R14-05", [
+      {id: "named-sloppy-optional-call", source: 'var hidden=1;function f(){this.hidden=2;}f?.();globalThis.answer=hidden;', answer: 2},
+      {id: "named-sloppy-tagged-template", source: 'var hidden=1;function f(){this.hidden=2;}f``;globalThis.answer=hidden;', answer: 2},
+      {id: "named-sloppy-sequence-callee", source: 'var hidden=1;function f(){this.hidden=2;}(0,f)();globalThis.answer=hidden;', answer: 2},
+      {id: "strict-optional-call-control", source: 'var hidden=1;function f(){"use strict";if(this)this.hidden=2;}f?.();globalThis.answer=hidden;', answer: 1},
+      {id: "optional-member-call-control", source: 'var hidden=1;const object={f:function(){this.hidden=2;}};object.f?.();globalThis.answer=hidden;', answer: 1},
+      {id: "tagged-member-call-control", source: 'var hidden=1;const object={f:function(){this.hidden=2;}};object.f``;globalThis.answer=hidden;', answer: 1},
+      {id: "constructor-call-control", source: 'var hidden=1;function f(){this.hidden=2;}new f();globalThis.answer=hidden;', answer: 1},
+    ]);
+    const moduleControl = collectRevision14Module("T237-P-R14-05-module-control", 'var hidden=1;function f(){if(this)this.hidden=2;}f?.();console.log(hidden);export{};');
+    expect({rows: revision14Actual(results), module: moduleControl.after}).toEqual({rows: revision14Expected(results), module: moduleControl.before});
+  });
+});

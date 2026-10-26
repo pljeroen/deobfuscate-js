@@ -169,4 +169,9 @@ new C().m();
   {id: "named-sloppy-bare-call", source: 'var value=1;function set(){this.value=2;}set();globalThis.answer=value;'},
   {id: "cfu-current-tree-reorder", source: 'var value=1;var _0xo="0|1".split("|"),_0xi=0;while(!![]){switch(_0xo[_0xi++]){case"1":var globalThis={};continue;case"0":globalThis.value=2;continue;}break;}answer=value;'},
   {id: "ineffective-script-global-undefined-initializer", source: 'var undefined=7;globalThis.answer=undefined;'},
+  {id: "script-global-undefined-cross-branch-typeof", source: 'var undefined;var c=[1].length>0;if(c){undefined=1;}else{undefined=2;}globalThis.answer=typeof undefined;'},
+  {id: "globalthis-root-write-own-constructor", source: 'var hidden=1;var x={constructor:{}};globalThis.x=function(){};x.constructor("hidden=2")();globalThis.answer=hidden;'},
+  {id: "object-computed-constructor-key", source: 'var hidden=1;var k="constructor";Object[k]("hidden=2")();globalThis.answer=hidden;'},
+  {id: "destructured-eval-later-spread", source: '(function(){var hidden=1;var src={eval:globalThis.eval};var {eval}={eval:function(s){return s;},...src};eval("hidden=42");globalThis.answer=hidden;})();', expectedWarnings: ["Parse error (recovered): Binding 'eval' in strict mode. (1:61)"]},
+  {id: "named-sloppy-optional-call", source: 'var hidden=1;function f(){this.hidden=2;}f?.();globalThis.answer=hidden;'},
 ];
