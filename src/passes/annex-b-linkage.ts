@@ -142,134 +142,301 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
         markValueMutation(violation.scope.getBinding(violation.node.right.name), seen);
     }
   };
+  // Synthetic selector nodes are stable within one facts snapshot, so origin
+  // fixed-point passes share them instead of continually expanding the graph.
+  const patternSourceCache = new WeakMap<object, [any, any][]>();
   const patternSources = (pattern: any, value: any): [any, any][] => {
-    if (t.isIdentifier(pattern)) return [[pattern, value]];
-    if (t.isAssignmentPattern(pattern))
-      return patternSources(pattern.left, t.logicalExpression("??", t.cloneNode(value), t.cloneNode(pattern.right)));
-    if (t.isObjectPattern(pattern)) {
-      return pattern.properties.flatMap((property: any) => t.isObjectProperty(property)
-        ? patternSources(property.value, t.memberExpression(t.cloneNode(value), t.cloneNode(property.key), property.computed || !t.isIdentifier(property.key)))
-        : []);
-    }
-    if (t.isArrayPattern(pattern)) {
-      return pattern.elements.flatMap((element: any, index: number) =>
-        patternSources(element, t.memberExpression(t.cloneNode(value), t.numericLiteral(index), true)));
-    }
-    return [];
+    const cached = patternSourceCache.get(pattern);
+    if (cached) return cached;
+    let result: [any, any][];
+    if (t.isIdentifier(pattern)) result = [[pattern, value]];
+    else if (t.isAssignmentPattern(pattern))
+      result = patternSources(pattern.left, t.logicalExpression("??", t.cloneNode(value), t.cloneNode(pattern.right)));
+    else if (t.isObjectPattern(pattern)) {
+      result = pattern.properties.flatMap((property: any) => {
+        if (!t.isObjectProperty(property)) return [];
+        const name = propertyName(property.key, property.computed);
+        const selected = t.isObjectExpression(value) && name !== null
+          ? [...value.properties].reverse().find((candidate: any) =>
+            t.isObjectProperty(candidate) && propertyName(candidate.key, candidate.computed) === name)
+          : null;
+        const source = selected && t.isObjectProperty(selected) && t.isExpression(selected.value)
+          ? selected.value
+          : t.memberExpression(t.cloneNode(value), t.cloneNode(property.key), property.computed || !t.isIdentifier(property.key));
+        return patternSources(property.value, source);
+      });
+    } else if (t.isArrayPattern(pattern)) {
+      result = pattern.elements.flatMap((element: any, index: number) => {
+        if (!element) return [];
+        const selected = t.isArrayExpression(value) ? value.elements[index] : null;
+        const source = selected && !t.isSpreadElement(selected)
+          ? selected
+          : t.memberExpression(t.cloneNode(value), t.numericLiteral(index), true);
+        return patternSources(element, source);
+      });
+    } else result = [];
+    patternSourceCache.set(pattern, result);
+    return result;
   };
   const propertyName = (key: any, computed: boolean): string | null =>
     !computed && t.isIdentifier(key) ? key.name : t.isStringLiteral(key) ? key.value : null;
 
   // A may-origin relation, including reassigned aliases: uncertainty never proves independence.
   const EVAL = 1, CONSTRUCTOR = 2, ROOT = 4, CREATED = 8, CALLABLE = 16;
-  const definitelyPrecedes = (operation: any, access: any): boolean => {
-    const statement = operation.parentPath;
-    let accessPosition = access;
-    while (accessPosition.parentPath && !accessPosition.parentPath.isStatement())
-      accessPosition = accessPosition.parentPath;
-    const accessStatement = accessPosition.parentPath;
-    if (!statement || !accessStatement || statement.parentPath !== accessStatement.parentPath
-      || !(statement.parentPath.isProgram() || statement.parentPath.isBlockStatement())) return false;
-    return typeof statement.key === "number" && typeof accessStatement.key === "number"
-      && statement.key < accessStatement.key;
+  const currentStatement = (path: any): any | null => {
+    let position = path;
+    while (position?.parentPath && !(position.parentPath.isProgram() || position.parentPath.isBlockStatement()))
+      position = position.parentPath;
+    return position?.parentPath && (position.parentPath.isProgram() || position.parentPath.isBlockStatement())
+      && position.listKey === "body" && typeof position.key === "number" ? position : null;
   };
-  const hasOwnConstructorOverride = (node: any, lookupSite: any, accessSite = lookupSite,
-    seen = new Set<any>()): boolean => {
+  const activation = (path: any): any =>
+    path.findParent((candidate: any) => candidate.isFunction() && !candidate.isArrowFunctionExpression()) ?? program;
+  const sameCurrentList = (leftPath: any, rightPath: any): boolean => {
+    const left = currentStatement(leftPath), right = currentStatement(rightPath);
+    return !!left && !!right && left.parentPath === right.parentPath
+      && activation(leftPath) === activation(rightPath);
+  };
+  const directOperationStatement = (operation: any): any | null => {
+    const statement = operation?.parentPath;
+    return statement?.isExpressionStatement() && statement.node.expression === operation.node
+      && currentStatement(operation) === statement ? statement : null;
+  };
+  const initializedAt = (binding: any, site: any): boolean => {
+    if (!(script && binding.kind === "var" && binding.scope === program.scope)) return true;
+    const declaration = currentStatement(binding.path), access = currentStatement(site);
+    return !!declaration && !!access && sameCurrentList(binding.path, site) && declaration.key <= access.key;
+  };
+  const valueProvedNotFunctionConstructor = (node: any, site: any, seen = new Set<any>()): boolean => {
+    if (!node) return false;
+    if (t.isParenthesizedExpression(node)) return valueProvedNotFunctionConstructor(node.expression, site, seen);
+    if (t.isSequenceExpression(node)) return valueProvedNotFunctionConstructor(node.expressions.at(-1), site, seen);
+    if (t.isFunctionExpression(node) || t.isArrowFunctionExpression(node) || t.isClassExpression(node)
+      || t.isObjectExpression(node) || t.isArrayExpression(node) || t.isLiteral(node)
+      || t.isTemplateLiteral(node)) return true;
     if (!t.isIdentifier(node)) return false;
-    const binding = lookupSite.scope.getBinding(node.name);
-    if (!binding || seen.has(binding)) return false;
-    const accessStart = accessSite.node.start;
-    if (typeof accessStart !== "number") return false;
-    const operations: any[] = [];
-    for (const reference of binding.referencePaths) {
-      const member = reference.parentPath;
-      if (!(member?.isMemberExpression() || member?.isOptionalMemberExpression())
-        || member.node.object !== reference.node
-        || propertyName(member.node.property, member.node.computed) !== "constructor"
-        || !isWriteTarget(member) || typeof member.node.end !== "number"
-        || member.node.end > accessStart) continue;
-      operations.push(member);
-    }
-    operations.sort((left, right) => (left.node.start ?? 0) - (right.node.start ?? 0));
-    let own = false;
-    for (const member of operations) {
-      const operation = member.parentPath;
-      const direct = operation?.parentPath?.isExpressionStatement()
-        && operation.parentPath.node.expression === operation.node
-        && definitelyPrecedes(operation, accessSite);
-      if (direct && operation.isAssignmentExpression({ operator: "=" })
-        && operation.node.left === member.node) own = true;
-      else if (direct && operation.isUnaryExpression({ operator: "delete" })
-        && operation.node.argument === member.node) own = false;
-      else own = false;
-    }
-    if (operations.length) return own;
+    const binding = site.scope.getBinding(node.name);
+    if (!binding || seen.has(binding) || !binding.constant || cellWrites.has(binding)) return false;
+    if (binding.path.isFunctionDeclaration() || binding.path.isClassDeclaration()) return true;
     if (!binding.path.isVariableDeclarator() || !binding.path.node.init) return false;
     const next = new Set(seen); next.add(binding);
-    return hasOwnConstructorOverride(binding.path.node.init, binding.path, accessSite, next);
+    return valueProvedNotFunctionConstructor(binding.path.node.init, binding.path, next);
   };
-  const origin = (node: any, site: any, seen = new Set<any>()): number => {
-    if (!node) return 0;
-    if (t.isParenthesizedExpression(node)) return origin(node.expression, site, seen);
-    if (t.isSequenceExpression(node)) return origin(node.expressions.at(-1), site, seen);
-    if (t.isConditionalExpression(node)) return origin(node.consequent, site, seen) | origin(node.alternate, site, seen);
-    if (t.isLogicalExpression(node)) return origin(node.left, site, seen) | origin(node.right, site, seen);
-    if (t.isAssignmentExpression(node)) return origin(node.right, site, seen);
-    if (t.isThisExpression(node)) {
-      const owner = site.findParent((p: any) => p.isFunction() && !p.isArrowFunctionExpression());
-      return script && !owner ? ROOT : 0;
+  const objectLiteralOwnConstructorSafe = (node: any, site: any): boolean => {
+    if (!t.isObjectExpression(node) || node.properties.some((property: any) => t.isSpreadElement(property))) return false;
+    const own = node.properties.filter((property: any) =>
+      (t.isObjectProperty(property) || t.isObjectMethod(property))
+      && propertyName(property.key, property.computed) === "constructor");
+    if (own.length !== 1) return false;
+    const property: any = own[0];
+    return t.isObjectMethod(property) || (t.isObjectProperty(property)
+      && valueProvedNotFunctionConstructor(property.value, site));
+  };
+  const hasSafeOwnConstructorAt = (node: any, lookupSite: any, accessSite = lookupSite): boolean => {
+    if (objectLiteralOwnConstructorSafe(node, lookupSite)) return true;
+    if (!t.isIdentifier(node)) return false;
+    const root = lookupSite.scope.getBinding(node.name);
+    const access = currentStatement(accessSite);
+    if (!root || !access) return false;
+    const owner = activation(accessSite);
+    if (owner !== program && (owner.node.async || owner.node.generator)) return false;
+
+    const component = new Set<any>();
+    const queue = [root];
+    let closed = true;
+    const add = (binding: any): void => {
+      if (binding && !component.has(binding) && !queue.includes(binding)) queue.push(binding);
+    };
+    while (queue.length && closed) {
+      const binding = queue.shift();
+      if (!binding || component.has(binding)) continue;
+      component.add(binding);
+      if (binding.path.isVariableDeclarator() && t.isIdentifier(binding.path.node.init)) {
+        const source = binding.path.scope.getBinding(binding.path.node.init.name);
+        if (binding.constant && !cellWrites.has(binding) && source) add(source);
+      }
+      for (const reference of binding.referencePaths) {
+        const parent = reference.parentPath;
+        if (parent?.isVariableDeclarator() && parent.node.init === reference.node && t.isIdentifier(parent.node.id)) {
+          const alias = parent.scope.getBinding(parent.node.id.name);
+          if (!alias || !alias.constant || cellWrites.has(alias) || !sameCurrentList(parent, accessSite)) { closed = false; break; }
+          add(alias);
+        }
+      }
     }
-    if (t.isIdentifier(node)) {
-      const binding = site.scope.getBinding(node.name);
-      const named = node.name === "eval" ? EVAL : node.name === "Function" ? CONSTRUCTOR : 0;
-      if (dynamicLookup(site, node.name)) return EVAL | CONSTRUCTOR | ROOT | CREATED;
-      if (!binding) return named | (node.name === "globalThis" ? ROOT : 0);
-      const rootSlot = node.name === "globalThis" && script && binding.scope === program.scope
-        && (binding.kind === "var" || binding.kind === "hoisted");
-      if (seen.has(binding)) return named | (rootSlot ? ROOT : 0);
-      const next = new Set(seen); next.add(binding);
-      let value = 0;
-      if (binding.path.isVariableDeclarator() && binding.path.node.init) {
-        const declaration = binding.path.node;
-        const initializers = t.isIdentifier(declaration.id) ? [[declaration.id, declaration.init]]
-          : patternSources(declaration.id, declaration.init);
-        for (const [target, initializer] of initializers)
-          if (binding.path.scope.getBinding(target.name) === binding) value |= origin(initializer, binding.path, next);
+    if (!closed) return false;
+
+    type State = "INHERITED" | "OWN_SAFE" | "UNKNOWN";
+    const operations: { key: number; state: State }[] = [];
+    const classifyValue = (value: any, site: any): State => objectLiteralOwnConstructorSafe(value, site)
+      ? "OWN_SAFE" : valueProvedNotFunctionConstructor(value, site) ? "INHERITED" : "UNKNOWN";
+    for (const binding of component) {
+      if (binding.path.isFunctionDeclaration() || binding.path.isClassDeclaration()) {
+        const statement = currentStatement(binding.path);
+        if (sameCurrentList(binding.path, accessSite)) operations.push({ key: statement.key, state: "INHERITED" });
+      } else if (binding.path.isVariableDeclarator() && binding.path.node.init
+        && !t.isIdentifier(binding.path.node.init)) {
+        const statement = currentStatement(binding.path);
+        if (!sameCurrentList(binding.path, accessSite)) return false;
+        operations.push({ key: statement.key, state: classifyValue(binding.path.node.init, binding.path) });
       }
       for (const violation of binding.constantViolations) {
-        if (violation.isAssignmentExpression()) value |= origin(violation.node.right, violation, next);
-        else value |= named;
+        if (!violation.isAssignmentExpression({ operator: "=" })
+          || !t.isIdentifier(violation.node.left)) return false;
+        const statement = directOperationStatement(violation);
+        if (!statement || !sameCurrentList(violation, accessSite)) return false;
+        operations.push({ key: statement.key, state: classifyValue(violation.node.right, violation) });
       }
-      const initialized = !(script && binding.kind === "var" && binding.scope === program.scope)
-        || (!site.getFunctionParent() && binding.path.parentPath?.parentPath?.isProgram()
-          && typeof binding.path.node.end === "number" && typeof site.node.start === "number"
-          && binding.path.node.end <= site.node.start);
-      const stable = initialized && binding.constant && !cellWrites.has(binding) && !dynamicLookup(site, node.name);
-      const ordinary = stable && (binding.path.isFunctionDeclaration() || (binding.path.isVariableDeclarator()
-        && (t.isFunctionExpression(binding.path.node.init) || t.isArrowFunctionExpression(binding.path.node.init))));
-      const init = binding.path.isVariableDeclarator() ? binding.path.node.init : null;
-      const callable = stable && (binding.path.isFunctionDeclaration() || t.isFunctionExpression(init)
-        || t.isArrowFunctionExpression(init) || (t.isIdentifier(init) && !!(value & CALLABLE)));
-      const distinctRoot = initialized && binding.constant && !cellWrites.has(binding)
-        && (binding.path.isFunctionDeclaration() || t.isFunctionExpression(init) || t.isArrowFunctionExpression(init)
-          || t.isObjectExpression(init) || t.isArrayExpression(init) || t.isClassExpression(init)
-          || t.isLiteral(init) || t.isTemplateLiteral(init));
-      return (value & ~CALLABLE) | (callable ? CALLABLE : 0) | (ordinary || distinctRoot ? 0 : named)
-        | (rootSlot && !distinctRoot ? ROOT : 0);
+      for (const reference of binding.referencePaths) {
+        const parent = reference.parentPath;
+        if (parent?.isVariableDeclarator() && parent.node.init === reference.node
+          && t.isIdentifier(parent.node.id) && component.has(parent.scope.getBinding(parent.node.id.name))) continue;
+        const member = parent;
+        if (!(member?.isMemberExpression() || member?.isOptionalMemberExpression())
+          || member.node.object !== reference.node
+          || propertyName(member.node.property, member.node.computed) !== "constructor") return false;
+        if (member === accessSite || member.node === accessSite.node) continue;
+        const operation = member.parentPath;
+        const statement = directOperationStatement(operation);
+        if (!statement || !sameCurrentList(operation, accessSite)) return false;
+        if (operation?.isAssignmentExpression({ operator: "=" }) && operation.node.left === member.node) {
+          operations.push({ key: statement.key, state: valueProvedNotFunctionConstructor(operation.node.right, operation)
+            ? "OWN_SAFE" : "UNKNOWN" });
+        } else if (operation?.isUnaryExpression({ operator: "delete" }) && operation.node.argument === member.node) {
+          operations.push({ key: statement.key, state: "INHERITED" });
+        } else return false;
+      }
     }
-    if (t.isMemberExpression(node) || t.isOptionalMemberExpression(node)) {
-      const key = propertyName(node.property, node.computed);
-      if (key === "constructor" && (t.isFunctionExpression(node.object)
-        || t.isArrowFunctionExpression(node.object) || t.isClassExpression(node.object))) return CONSTRUCTOR;
-      const objectOrigin = origin(node.object, site, seen);
-      if (key === "constructor" && (objectOrigin & CALLABLE)
-        && !hasOwnConstructorOverride(node.object, site)) return CONSTRUCTOR;
-      if (!(objectOrigin & ROOT)) return 0;
-      return key === "eval" ? EVAL : key === "Function" ? CONSTRUCTOR : key === "globalThis" ? ROOT
-        : key === null ? EVAL | CONSTRUCTOR | ROOT : 0;
+    operations.sort((left, right) => left.key - right.key);
+    let state: State = "UNKNOWN";
+    for (const operation of operations) if (operation.key < access.key) state = operation.state;
+    return state === "OWN_SAFE";
+  };
+  const functionMayReceiveGlobalThis = (owner: any): boolean => {
+    if (!script || owner.isInStrictMode() || owner.node.async || owner.node.generator
+      || !(owner.isFunctionDeclaration() || owner.isFunctionExpression())) return false;
+    const parent = owner.parentPath;
+    if (owner.isFunctionExpression() && parent?.isCallExpression() && !parent.node.optional
+      && parent.node.callee === owner.node) return true;
+    let binding: any = null;
+    if (owner.isFunctionDeclaration() && owner.node.id)
+      binding = owner.parentPath.scope.getBinding(owner.node.id.name);
+    else if (parent?.isVariableDeclarator() && t.isIdentifier(parent.node.id))
+      binding = parent.scope.getBinding(parent.node.id.name);
+    if (!binding) return false;
+    const component = new Set<any>();
+    const queue = [binding];
+    while (queue.length) {
+      const current = queue.shift();
+      if (!current || component.has(current)) continue;
+      component.add(current);
+      if (current.path.isVariableDeclarator() && t.isIdentifier(current.path.node.init)
+        && current.constant && !cellWrites.has(current))
+        queue.push(current.path.scope.getBinding(current.path.node.init.name));
+      for (const reference of current.referencePaths) {
+        const use = reference.parentPath;
+        if (use?.isCallExpression() && !use.node.optional && use.node.callee === reference.node) return true;
+        if (use?.isVariableDeclarator() && use.node.init === reference.node && t.isIdentifier(use.node.id)) {
+          const alias = use.scope.getBinding(use.node.id.name);
+          if (alias?.constant && !cellWrites.has(alias)) queue.push(alias);
+        }
+      }
     }
-    if ((t.isCallExpression(node) || t.isNewExpression(node)) && (origin(node.callee, site, seen) & CONSTRUCTOR)) return CREATED;
-    return 0;
+    return false;
+  };
+  const origin = (rootNode: any, rootSite: any): number => {
+    type Entry = { node: any; site: any; value: number; visiting: boolean; done: boolean };
+    const byNode = new Map<any, Map<any, Entry>>();
+    let changed = false;
+    const entryFor = (node: any, site: any): Entry => {
+      let bySite = byNode.get(node);
+      if (!bySite) { bySite = new Map(); byNode.set(node, bySite); }
+      let entry = bySite.get(site);
+      if (!entry) { entry = { node, site, value: 0, visiting: false, done: false }; bySite.set(site, entry); }
+      return entry;
+    };
+    const evaluate = (entry: Entry): number => {
+      if (entry.done || entry.visiting) return entry.value;
+      entry.visiting = true;
+      const node = entry.node, site = entry.site;
+      const dependency = (value: any, valueSite = site): number => value ? evaluate(entryFor(value, valueSite)) : 0;
+      let value = 0;
+      if (!node) value = 0;
+      else if (t.isParenthesizedExpression(node)) value = dependency(node.expression);
+      else if (t.isSequenceExpression(node)) value = dependency(node.expressions.at(-1));
+      else if (t.isConditionalExpression(node)) value = dependency(node.consequent) | dependency(node.alternate);
+      else if (t.isLogicalExpression(node)) value = dependency(node.left) | dependency(node.right);
+      else if (t.isAssignmentExpression(node)) value = dependency(node.right);
+      else if (t.isThisExpression(node)) {
+        const owner = site.findParent((candidate: any) => candidate.isFunction() && !candidate.isArrowFunctionExpression());
+        value = script && (!owner || functionMayReceiveGlobalThis(owner)) ? ROOT : 0;
+      } else if (t.isIdentifier(node)) {
+        const binding = site.scope.getBinding(node.name);
+        const named = node.name === "eval" ? EVAL : node.name === "Function" ? CONSTRUCTOR : 0;
+        if (dynamicLookup(site, node.name)) value = EVAL | CONSTRUCTOR | ROOT | CREATED;
+        else if (!binding) value = named | (node.name === "globalThis" ? ROOT : 0);
+        else {
+          const rootSlot = node.name === "globalThis" && script && binding.scope === program.scope
+            && (binding.kind === "var" || binding.kind === "hoisted");
+          let bindingValue = 0;
+          let selectedInit: any = null;
+          if (binding.path.isVariableDeclarator() && binding.path.node.init) {
+            const declaration = binding.path.node;
+            const initializers = t.isIdentifier(declaration.id) ? [[declaration.id, declaration.init]]
+              : patternSources(declaration.id, declaration.init);
+            for (const [target, initializer] of initializers) {
+              if (binding.path.scope.getBinding(target.name) !== binding) continue;
+              selectedInit = initializer;
+              bindingValue |= dependency(initializer, binding.path);
+            }
+          }
+          for (const violation of binding.constantViolations) {
+            if (violation.isAssignmentExpression()) bindingValue |= dependency(violation.node.right, violation);
+            else bindingValue |= named;
+          }
+          const initialized = initializedAt(binding, site);
+          const stable = initialized && binding.constant && !cellWrites.has(binding) && !dynamicLookup(site, node.name);
+          const ordinary = stable && (binding.path.isFunctionDeclaration()
+            || t.isFunctionExpression(selectedInit) || t.isArrowFunctionExpression(selectedInit));
+          const callable = stable && (binding.path.isFunctionDeclaration() || t.isFunctionExpression(selectedInit)
+            || t.isArrowFunctionExpression(selectedInit) || (t.isIdentifier(selectedInit) && !!(bindingValue & CALLABLE)));
+          const distinctRoot = initialized && binding.constant && !cellWrites.has(binding)
+            && (binding.path.isFunctionDeclaration() || t.isFunctionExpression(selectedInit)
+              || t.isArrowFunctionExpression(selectedInit) || t.isObjectExpression(selectedInit)
+              || t.isArrayExpression(selectedInit) || t.isClassExpression(selectedInit)
+              || t.isLiteral(selectedInit) || t.isTemplateLiteral(selectedInit));
+          value = (bindingValue & ~CALLABLE) | (callable ? CALLABLE : 0) | (ordinary || distinctRoot ? 0 : named)
+            | (rootSlot && !distinctRoot ? ROOT : 0);
+        }
+      } else if (t.isMemberExpression(node) || t.isOptionalMemberExpression(node)) {
+        const key = propertyName(node.property, node.computed);
+        if (key === "constructor" && !hasSafeOwnConstructorAt(node.object, site)) value = CONSTRUCTOR;
+        else if (key === "constructor") value = 0;
+        else {
+          const objectOrigin = dependency(node.object);
+          const possibleCallable = t.isFunctionExpression(node.object) || t.isArrowFunctionExpression(node.object)
+            || t.isClassExpression(node.object) || !!(objectOrigin & CALLABLE);
+          const computedConstructor = key === null && possibleCallable ? CONSTRUCTOR : 0;
+          value = computedConstructor | (!(objectOrigin & ROOT) ? 0
+            : key === "eval" ? EVAL : key === "Function" ? CONSTRUCTOR : key === "globalThis" ? ROOT
+              : key === null ? EVAL | CONSTRUCTOR | ROOT : 0);
+        }
+      } else if ((t.isCallExpression(node) || t.isNewExpression(node)) && (dependency(node.callee) & CONSTRUCTOR)) {
+        value = CREATED;
+      }
+      const joined = entry.value | value;
+      if (joined !== entry.value) { entry.value = joined; changed = true; }
+      entry.visiting = false;
+      entry.done = true;
+      return entry.value;
+    };
+    const root = entryFor(rootNode, rootSite);
+    do {
+      changed = false;
+      for (const bySite of byNode.values()) for (const entry of bySite.values()) entry.done = false;
+      evaluate(root);
+    } while (changed);
+    return root.value;
   };
   const possibleDirectEval = (callee: t.Node, site: any): boolean => {
     let node = callee;
