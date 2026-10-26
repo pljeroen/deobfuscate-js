@@ -145,6 +145,10 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
   // Synthetic selector nodes are stable within one facts snapshot, so origin
   // fixed-point passes share them instead of continually expanding the graph.
   const patternSourceCache = new WeakMap<object, [any, any][]>();
+  const patternBindsEval = (pattern: any): boolean =>
+    Object.prototype.hasOwnProperty.call(t.getBindingIdentifiers(pattern), "eval");
+  const conservativePatternSource = (pattern: any, fallback: any): any =>
+    patternBindsEval(pattern) ? t.identifier("eval") : fallback;
   const patternSources = (pattern: any, value: any): [any, any][] => {
     const cached = patternSourceCache.get(pattern);
     if (cached) return cached;
@@ -156,22 +160,36 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
       result = pattern.properties.flatMap((property: any) => {
         if (!t.isObjectProperty(property)) return [];
         const name = propertyName(property.key, property.computed);
-        const selected = t.isObjectExpression(value) && name !== null
-          ? [...value.properties].reverse().find((candidate: any) =>
-            t.isObjectProperty(candidate) && propertyName(candidate.key, candidate.computed) === name)
-          : null;
-        const source = selected && t.isObjectProperty(selected) && t.isExpression(selected.value)
-          ? selected.value
-          : t.memberExpression(t.cloneNode(value), t.cloneNode(property.key), property.computed || !t.isIdentifier(property.key));
+        let selected: any = null;
+        if (t.isObjectExpression(value) && name !== null) {
+          for (let index = value.properties.length - 1; index >= 0; index--) {
+            const candidate: any = value.properties[index];
+            if (t.isSpreadElement(candidate)) break;
+            if (!(t.isObjectProperty(candidate) || t.isObjectMethod(candidate))) continue;
+            const candidateName = propertyName(candidate.key, candidate.computed);
+            if (candidateName === null && candidate.computed) break;
+            if (candidateName !== name) continue;
+            if ((t.isObjectProperty(candidate) && t.isExpression(candidate.value))
+              || (t.isObjectMethod(candidate) && candidate.kind === "method")) selected = candidate;
+            break;
+          }
+        }
+        const fallback = t.memberExpression(t.cloneNode(value), t.cloneNode(property.key), property.computed || !t.isIdentifier(property.key));
+        const source = selected && t.isObjectProperty(selected) ? selected.value
+          : selected && t.isObjectMethod(selected) ? selected
+            : conservativePatternSource(property.value, fallback);
         return patternSources(property.value, source);
       });
     } else if (t.isArrayPattern(pattern)) {
       result = pattern.elements.flatMap((element: any, index: number) => {
         if (!element) return [];
-        const selected = t.isArrayExpression(value) ? value.elements[index] : null;
+        const selected = t.isArrayExpression(value)
+          && !value.elements.slice(0, index + 1).some(candidate => t.isSpreadElement(candidate))
+          ? value.elements[index] : null;
+        const fallback = t.memberExpression(t.cloneNode(value), t.numericLiteral(index), true);
         const source = selected && !t.isSpreadElement(selected)
           ? selected
-          : t.memberExpression(t.cloneNode(value), t.numericLiteral(index), true);
+          : conservativePatternSource(element, fallback);
         return patternSources(element, source);
       });
     } else result = [];
@@ -179,7 +197,10 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
     return result;
   };
   const propertyName = (key: any, computed: boolean): string | null =>
-    !computed && t.isIdentifier(key) ? key.name : t.isStringLiteral(key) ? key.value : null;
+    !computed && t.isIdentifier(key) ? key.name
+      : t.isStringLiteral(key) ? key.value
+        : t.isNumericLiteral(key) ? String(key.value)
+          : t.isBigIntLiteral(key) ? key.value : null;
 
   // A may-origin relation, including reassigned aliases: uncertainty never proves independence.
   const EVAL = 1, CONSTRUCTOR = 2, ROOT = 4, CREATED = 8, CALLABLE = 16;
@@ -191,7 +212,9 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
       && position.listKey === "body" && typeof position.key === "number" ? position : null;
   };
   const activation = (path: any): any =>
-    path.findParent((candidate: any) => candidate.isFunction() && !candidate.isArrowFunctionExpression()) ?? program;
+    path.findParent((candidate: any) => candidate.isFunction()
+      || candidate.isClassProperty?.() || candidate.isClassPrivateProperty?.()
+      || candidate.isClassAccessorProperty?.()) ?? program;
   const sameCurrentList = (leftPath: any, rightPath: any): boolean => {
     const left = currentStatement(leftPath), right = currentStatement(rightPath);
     return !!left && !!right && left.parentPath === right.parentPath
@@ -223,101 +246,95 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
     return valueProvedNotFunctionConstructor(binding.path.node.init, binding.path, next);
   };
   const objectLiteralOwnConstructorSafe = (node: any, site: any): boolean => {
-    if (!t.isObjectExpression(node) || node.properties.some((property: any) => t.isSpreadElement(property))) return false;
+    if (!t.isObjectExpression(node) || node.properties.some((property: any) =>
+      t.isSpreadElement(property) || ((t.isObjectProperty(property) || t.isObjectMethod(property))
+        && property.computed && propertyName(property.key, true) === null))) return false;
     const own = node.properties.filter((property: any) =>
       (t.isObjectProperty(property) || t.isObjectMethod(property))
       && propertyName(property.key, property.computed) === "constructor");
     if (own.length !== 1) return false;
     const property: any = own[0];
-    return t.isObjectMethod(property) || (t.isObjectProperty(property)
+    return (t.isObjectMethod(property) && property.kind === "method") || (t.isObjectProperty(property)
       && valueProvedNotFunctionConstructor(property.value, site));
   };
   const hasSafeOwnConstructorAt = (node: any, lookupSite: any, accessSite = lookupSite): boolean => {
     if (objectLiteralOwnConstructorSafe(node, lookupSite)) return true;
     if (!t.isIdentifier(node)) return false;
-    const root = lookupSite.scope.getBinding(node.name);
+    const binding = lookupSite.scope.getBinding(node.name);
     const access = currentStatement(accessSite);
-    if (!root || !access) return false;
+    if (!binding || !access || !binding.path.isVariableDeclarator()) return false;
+    if (objectBinding(binding) || linked.has(binding)) return false;
     const owner = activation(accessSite);
     if (owner !== program && (owner.node.async || owner.node.generator)) return false;
-
-    const component = new Set<any>();
-    const queue = [root];
-    let closed = true;
-    const add = (binding: any): void => {
-      if (binding && !component.has(binding) && !queue.includes(binding)) queue.push(binding);
-    };
-    while (queue.length && closed) {
-      const binding = queue.shift();
-      if (!binding || component.has(binding)) continue;
-      component.add(binding);
-      if (binding.path.isVariableDeclarator() && t.isIdentifier(binding.path.node.init)) {
-        const source = binding.path.scope.getBinding(binding.path.node.init.name);
-        if (binding.constant && !cellWrites.has(binding) && source) add(source);
-      }
-      for (const reference of binding.referencePaths) {
-        const parent = reference.parentPath;
-        if (parent?.isVariableDeclarator() && parent.node.init === reference.node && t.isIdentifier(parent.node.id)) {
-          const alias = parent.scope.getBinding(parent.node.id.name);
-          if (!alias || !alias.constant || cellWrites.has(alias) || !sameCurrentList(parent, accessSite)) { closed = false; break; }
-          add(alias);
-        }
-      }
-    }
-    if (!closed) return false;
-
     type State = "INHERITED" | "OWN_SAFE" | "UNKNOWN";
-    const operations: { key: number; state: State }[] = [];
-    const classifyValue = (value: any, site: any): State => objectLiteralOwnConstructorSafe(value, site)
-      ? "OWN_SAFE" : valueProvedNotFunctionConstructor(value, site) ? "INHERITED" : "UNKNOWN";
-    for (const binding of component) {
-      if (binding.path.isFunctionDeclaration() || binding.path.isClassDeclaration()) {
-        const statement = currentStatement(binding.path);
-        if (sameCurrentList(binding.path, accessSite)) operations.push({ key: statement.key, state: "INHERITED" });
-      } else if (binding.path.isVariableDeclarator() && binding.path.node.init
-        && !t.isIdentifier(binding.path.node.init)) {
-        const statement = currentStatement(binding.path);
-        if (!sameCurrentList(binding.path, accessSite)) return false;
-        operations.push({ key: statement.key, state: classifyValue(binding.path.node.init, binding.path) });
-      }
-      for (const violation of binding.constantViolations) {
-        if (!violation.isAssignmentExpression({ operator: "=" })
-          || !t.isIdentifier(violation.node.left)) return false;
-        const statement = directOperationStatement(violation);
-        if (!statement || !sameCurrentList(violation, accessSite)) return false;
-        operations.push({ key: statement.key, state: classifyValue(violation.node.right, violation) });
-      }
-      for (const reference of binding.referencePaths) {
-        const parent = reference.parentPath;
-        if (parent?.isVariableDeclarator() && parent.node.init === reference.node
-          && t.isIdentifier(parent.node.id) && component.has(parent.scope.getBinding(parent.node.id.name))) continue;
-        const member = parent;
-        if (!(member?.isMemberExpression() || member?.isOptionalMemberExpression())
-          || member.node.object !== reference.node
-          || propertyName(member.node.property, member.node.computed) !== "constructor") return false;
+    type Operation = { key: number; kind: "VALUE" | "OWN" | "DELETE"; state?: State; fresh?: boolean; reference?: any };
+    const operations: Operation[] = [];
+    const classifyValue = (value: any, site: any): { state: State; fresh: boolean } => {
+      const fresh = t.isFunctionExpression(value) || t.isArrowFunctionExpression(value)
+        || t.isClassExpression(value) || t.isObjectExpression(value) || t.isArrayExpression(value);
+      return { state: objectLiteralOwnConstructorSafe(value, site) ? "OWN_SAFE"
+        : fresh ? "INHERITED" : "UNKNOWN", fresh };
+    };
+    if (binding.path.node.init) {
+      if (!sameCurrentList(binding.path, accessSite)) return false;
+      const initial = classifyValue(binding.path.node.init, binding.path);
+      operations.push({ key: currentStatement(binding.path).key, kind: "VALUE", ...initial });
+    }
+    for (const violation of binding.constantViolations) {
+      if (!violation.isAssignmentExpression({ operator: "=" }) || !t.isIdentifier(violation.node.left)) return false;
+      const statement = directOperationStatement(violation);
+      if (!statement || !sameCurrentList(violation, accessSite)) return false;
+      operations.push({ key: statement.key, kind: "VALUE", ...classifyValue(violation.node.right, violation) });
+    }
+    for (const reference of binding.referencePaths) {
+      const member = reference.parentPath;
+      if ((member?.isMemberExpression() || member?.isOptionalMemberExpression())
+        && member.node.object === reference.node
+        && propertyName(member.node.property, member.node.computed) === "constructor") {
         if (member === accessSite || member.node === accessSite.node) continue;
         const operation = member.parentPath;
         const statement = directOperationStatement(operation);
         if (!statement || !sameCurrentList(operation, accessSite)) return false;
         if (operation?.isAssignmentExpression({ operator: "=" }) && operation.node.left === member.node) {
-          operations.push({ key: statement.key, state: valueProvedNotFunctionConstructor(operation.node.right, operation)
-            ? "OWN_SAFE" : "UNKNOWN" });
+          operations.push({ key: statement.key, kind: "OWN", state: valueProvedNotFunctionConstructor(operation.node.right, operation)
+            ? "OWN_SAFE" : "UNKNOWN", reference });
         } else if (operation?.isUnaryExpression({ operator: "delete" }) && operation.node.argument === member.node) {
-          operations.push({ key: statement.key, state: "INHERITED" });
+          operations.push({ key: statement.key, kind: "DELETE", reference });
         } else return false;
+        continue;
       }
+      const statement = currentStatement(reference);
+      if (!statement || !sameCurrentList(reference, accessSite)) return false;
+      operations.push({ key: statement.key, kind: "VALUE", state: "UNKNOWN", fresh: false, reference });
     }
     operations.sort((left, right) => left.key - right.key);
     let state: State = "UNKNOWN";
-    for (const operation of operations) if (operation.key < access.key) state = operation.state;
+    let fresh = false;
+    for (const operation of operations) {
+      if (operation.key >= access.key) continue;
+      if (operation.kind === "VALUE") {
+        if (operation.reference) { state = "UNKNOWN"; fresh = false; }
+        else { state = operation.state!; fresh = operation.fresh!; }
+      } else if (operation.kind === "OWN") state = fresh ? operation.state! : "UNKNOWN";
+      else state = fresh ? "INHERITED" : "UNKNOWN";
+    }
     return state === "OWN_SAFE";
+  };
+  const receiverlessInvocation = (reference: any): boolean => {
+    let position = reference;
+    while (position.parentPath?.isParenthesizedExpression()) position = position.parentPath;
+    const sequence = position.parentPath;
+    if (sequence?.isSequenceExpression() && sequence.node.expressions.at(-1) === position.node) position = sequence;
+    const use = position.parentPath;
+    return !!use && ((use.isCallExpression() && use.node.callee === position.node && !use.node.optional)
+      || (use.isOptionalCallExpression?.() && use.node.callee === position.node)
+      || (use.isTaggedTemplateExpression() && use.node.tag === position.node));
   };
   const functionMayReceiveGlobalThis = (owner: any): boolean => {
     if (!script || owner.isInStrictMode() || owner.node.async || owner.node.generator
       || !(owner.isFunctionDeclaration() || owner.isFunctionExpression())) return false;
     const parent = owner.parentPath;
-    if (owner.isFunctionExpression() && parent?.isCallExpression() && !parent.node.optional
-      && parent.node.callee === owner.node) return true;
+    if (owner.isFunctionExpression() && receiverlessInvocation(owner)) return true;
     let binding: any = null;
     if (owner.isFunctionDeclaration() && owner.node.id)
       binding = owner.parentPath.scope.getBinding(owner.node.id.name);
@@ -335,7 +352,7 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
         queue.push(current.path.scope.getBinding(current.path.node.init.name));
       for (const reference of current.referencePaths) {
         const use = reference.parentPath;
-        if (use?.isCallExpression() && !use.node.optional && use.node.callee === reference.node) return true;
+        if (receiverlessInvocation(reference)) return true;
         if (use?.isVariableDeclarator() && use.node.init === reference.node && t.isIdentifier(use.node.id)) {
           const alias = use.scope.getBinding(use.node.id.name);
           if (alias?.constant && !cellWrites.has(alias)) queue.push(alias);
@@ -414,9 +431,7 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
         else if (key === "constructor") value = 0;
         else {
           const objectOrigin = dependency(node.object);
-          const possibleCallable = t.isFunctionExpression(node.object) || t.isArrowFunctionExpression(node.object)
-            || t.isClassExpression(node.object) || !!(objectOrigin & CALLABLE);
-          const computedConstructor = key === null && possibleCallable ? CONSTRUCTOR : 0;
+          const computedConstructor = key === null ? CONSTRUCTOR : 0;
           value = computedConstructor | (!(objectOrigin & ROOT) ? 0
             : key === "eval" ? EVAL : key === "Function" ? CONSTRUCTOR : key === "globalThis" ? ROOT
               : key === null ? EVAL | CONSTRUCTOR | ROOT : 0);

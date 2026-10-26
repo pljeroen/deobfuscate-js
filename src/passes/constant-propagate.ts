@@ -21,6 +21,9 @@ export const constantPropagatePass: ASTPass = {
   run(ast: File): File {
     let facts = runtimeNameFacts(ast);
     const script = ast.program.sourceType !== "module" || ((ast as any).errors?.length ?? 0) > 0;
+    const ineffectiveScriptGlobalSpecialBinding = (binding: any, name: string): boolean =>
+      script && binding.kind === "var" && binding.scope.path.isProgram()
+      && ["undefined", "NaN", "Infinity"].includes(name);
     traverse(ast, {
       VariableDeclarator(path) {
         const init = path.get("init");
@@ -34,8 +37,7 @@ export const constantPropagatePass: ASTPass = {
         // At script global scope these names denote existing non-writable global
         // properties. The initializer still evaluates, but its value never becomes
         // the effective binding value and therefore cannot be propagated.
-        if (script && binding.kind === "var" && binding.scope.path.isProgram()
-          && ["undefined", "NaN", "Infinity"].includes(id.node.name)) return;
+        if (ineffectiveScriptGlobalSpecialBinding(binding, id.node.name)) return;
         if (facts.written(binding)) return;
 
         // Must not be reassigned
@@ -126,6 +128,7 @@ export const constantPropagatePass: ASTPass = {
 
         const binding = path.scope.getBinding(path.node.argument.name);
         if (!binding) return;
+        if (ineffectiveScriptGlobalSpecialBinding(binding, path.node.argument.name)) return;
         if (facts.written(binding)) return;
 
         // Must have exactly 2 constant violations (assignments)
