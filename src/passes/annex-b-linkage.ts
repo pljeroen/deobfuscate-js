@@ -266,6 +266,16 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
     if (objectBinding(binding) || linked.has(binding)) return false;
     const owner = activation(accessSite);
     if (owner !== program && (owner.node.async || owner.node.generator)) return false;
+    // Only direct expression statements in a non-repeating execution region prove order.
+    let accessOperation = accessSite;
+    while (accessOperation.parentPath?.node.callee === accessOperation.node)
+      accessOperation = accessOperation.parentPath;
+    if (directOperationStatement(accessOperation) !== access) return false;
+    let region = access.parentPath;
+    while (region !== owner) {
+      if (!region?.isBlockStatement()) return false;
+      region = region.parentPath;
+    }
     type State = "INHERITED" | "OWN_SAFE" | "UNKNOWN";
     type Operation = { key: number; kind: "VALUE" | "OWN" | "DELETE"; state?: State; fresh?: boolean; reference?: any };
     const operations: Operation[] = [];
@@ -276,7 +286,8 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
         : fresh ? "INHERITED" : "UNKNOWN", fresh };
     };
     if (binding.path.node.init) {
-      if (!sameCurrentList(binding.path, accessSite)) return false;
+      if (!sameCurrentList(binding.path, accessSite)
+        || binding.path.parentPath !== currentStatement(binding.path)) return false;
       const initial = classifyValue(binding.path.node.init, binding.path);
       operations.push({ key: currentStatement(binding.path).key, kind: "VALUE", ...initial });
     }
@@ -303,7 +314,9 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
         } else return false;
         continue;
       }
-      const statement = currentStatement(reference);
+      const use = reference.parentPath;
+      const statement = use.node.arguments?.includes(reference.node) && !use.node.optional
+        ? directOperationStatement(use) : directOperationStatement(reference);
       if (!statement || !sameCurrentList(reference, accessSite)) return false;
       operations.push({ key: statement.key, kind: "VALUE", state: "UNKNOWN", fresh: false, reference });
     }
@@ -311,7 +324,8 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
     let state: State = "UNKNOWN";
     let fresh = false;
     for (const operation of operations) {
-      if (operation.key >= access.key) continue;
+      if (operation.key === access.key) return false;
+      if (operation.key > access.key) continue;
       if (operation.kind === "VALUE") {
         if (operation.reference) { state = "UNKNOWN"; fresh = false; }
         else { state = operation.state!; fresh = operation.fresh!; }
