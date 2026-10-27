@@ -263,8 +263,10 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
     const binding = lookupSite.scope.getBinding(node.name);
     const access = currentStatement(accessSite);
     if (!binding || !access || !binding.path.isVariableDeclarator()) return false;
+    if (!t.isIdentifier(binding.path.node.id) || binding.path.node.id !== binding.identifier) return false;
     if (objectBinding(binding) || linked.has(binding)) return false;
     const owner = activation(accessSite);
+    if (activation(binding.path) !== owner) return false;
     if (owner !== program && (owner.node.async || owner.node.generator)) return false;
     // Only direct expression statements in a non-repeating execution region prove order.
     let accessOperation = accessSite;
