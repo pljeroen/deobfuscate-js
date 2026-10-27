@@ -828,3 +828,48 @@ describe("runtime name resolution constructor access ordering", () => {
     expect(observations).toEqual(expected);
   });
 });
+
+
+describe("runtime name resolution receiver declaration identity", () => {
+  it("T243 preserves activation ownership of constructor receivers", () => {
+    const results = collectRevision14Cases("T243-runtime", [
+      {id: "X1-nested-later-delete-global-let-receiver", source: "var hidden=1;let o;function g(n){o=function(){};o.constructor=function(){return function(){}};if(n)g(0);o.constructor(\"hidden=2\")();delete o.constructor;}g(1);globalThis.answer=hidden;", answer: 2},
+      {id: "X2-nested-later-pass-outer-fn-var-receiver", source: "var hidden=1;function strip(x){delete x.constructor;}function outer(){var o;function g(n){o=function(){};o.constructor=function(){return function(){}};if(n)g(0);o.constructor(\"hidden=2\")();strip(o);}g(1);}outer();globalThis.answer=hidden;", answer: 2},
+      {id: "X3-nested-later-delete-global-lexical-target", source: "let hidden=1;let o;function g(n){o=function(){};o.constructor=function(){return function(){}};if(n)g(0);o.constructor(\"hidden=2\")();delete o.constructor;}g(1);globalThis.answer=hidden;", answer: 2},
+      {id: "XC-nested-local-receiver-control", source: "var hidden=1;function g(n){var o;o=function(){};o.constructor=function(){return function(){}};if(n)g(0);o.constructor(\"hidden=2\")();delete o.constructor;}g(1);globalThis.answer=hidden;", answer: 1, post: "numeric"},
+      {id: "P1-direct-fresh-local-program", source: "let f=function(){};f.constructor=function(){return function(){}};var value=1;f.constructor(\"value=2\")();globalThis.answer=value;", answer: 1, post: "numeric"},
+      {id: "P2-direct-fresh-local-function", source: "function probe(){let f=function(){};f.constructor=function(){return function(){}};var value=1;f.constructor(\"value=2\")();globalThis.answer=value;}probe();", answer: 1, post: "numeric"},
+    ]);
+    const observations = results.map(row => ({
+      id: row.id, before: row.before, after: row.after, postcondition: row.postcondition,
+      sourceWarnings: parser.parseWithDiagnostics(row.source).warnings,
+      transformedWarnings: parser.parseWithDiagnostics(row.code).warnings,
+    }));
+    const expected = results.map(row => {
+      const outcome = {completion: {kind: "normal"}, globals: {answer: encode(row.answer), side: {type: "absent"}, events: encode([])}, stdout: "", stderr: ""};
+      return {id: row.id, before: outcome, after: outcome, postcondition: true, sourceWarnings: [], transformedWarnings: []};
+    });
+    record("T243-complete", {observations, expected});
+    expect(observations).toEqual(expected);
+  });
+  it("T248 preserves the value selected by receiver declarations", () => {
+    const results = collectRevision14Cases("T248-runtime", [
+      {id: "D1-pattern-init-own-safe-literal-var-target", source: "var hidden=1;let {o}={o:function(){},constructor:function(){return function(){}}};o.constructor(\"hidden=2\")();globalThis.answer=hidden;", answer: 2},
+      {id: "D2-pattern-default-own-safe-literal-let-target", source: "let hidden=1;let {o=function(){}}={constructor:function(){return function(){}}};o.constructor(\"hidden=2\")();globalThis.answer=hidden;", answer: 2},
+      {id: "D3-pattern-in-function-var-target", source: "var hidden=1;function probe(){const {o}={o:function(){},constructor:function(){return function(){}}};o.constructor(\"hidden=2\")();}probe();globalThis.answer=hidden;", answer: 2},
+      {id: "DC-plain-own-safe-literal-control", source: "var hidden=1;let o={constructor:function(){return function(){}}};o.constructor(\"hidden=2\")();globalThis.answer=hidden;", answer: 1, post: "numeric"},
+      {id: "E05-direct-literal", source: "var hidden=1;({constructor:function(){return function(){}}}).constructor(\"hidden=2\")();globalThis.answer=hidden;", answer: 1, post: "numeric"},
+    ]);
+    const observations = results.map(row => ({
+      id: row.id, before: row.before, after: row.after, postcondition: row.postcondition,
+      sourceWarnings: parser.parseWithDiagnostics(row.source).warnings,
+      transformedWarnings: parser.parseWithDiagnostics(row.code).warnings,
+    }));
+    const expected = results.map(row => {
+      const outcome = {completion: {kind: "normal"}, globals: {answer: encode(row.answer), side: {type: "absent"}, events: encode([])}, stdout: "", stderr: ""};
+      return {id: row.id, before: outcome, after: outcome, postcondition: true, sourceWarnings: [], transformedWarnings: []};
+    });
+    record("T248-complete", {observations, expected});
+    expect(observations).toEqual(expected);
+  });
+});

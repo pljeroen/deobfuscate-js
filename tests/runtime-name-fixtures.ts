@@ -175,4 +175,8 @@ new C().m();
   {id: "destructured-eval-later-spread", source: '(function(){var hidden=1;var src={eval:globalThis.eval};var {eval}={eval:function(s){return s;},...src};eval("hidden=42");globalThis.answer=hidden;})();', expectedWarnings: ["Parse error (recovered): Binding 'eval' in strict mode. (1:61)"]},
   {id: "named-sloppy-optional-call", source: 'var hidden=1;function f(){this.hidden=2;}f?.();globalThis.answer=hidden;'},
   {id: "same-statement-receiver-pass-own-constructor", source: "var hidden=1;let o=function(){};o.constructor=function(){return function(){}};function strip(x){delete x.constructor;}strip(o),o.constructor(\"hidden=2\")();globalThis.answer=hidden;"},
+  {id: "X1-nested-later-delete-global-let-receiver", source: "var hidden=1;let o;function g(n){o=function(){};o.constructor=function(){return function(){}};if(n)g(0);o.constructor(\"hidden=2\")();delete o.constructor;}g(1);globalThis.answer=hidden;"},
+  {id: "X3-nested-later-delete-global-lexical-target", source: "let hidden=1;let o;function g(n){o=function(){};o.constructor=function(){return function(){}};if(n)g(0);o.constructor(\"hidden=2\")();delete o.constructor;}g(1);globalThis.answer=hidden;"},
+  {id: "D1-pattern-init-own-safe-literal-var-target", source: "var hidden=1;let {o}={o:function(){},constructor:function(){return function(){}}};o.constructor(\"hidden=2\")();globalThis.answer=hidden;"},
+  {id: "D2-pattern-default-own-safe-literal-let-target", source: "let hidden=1;let {o=function(){}}={constructor:function(){return function(){}}};o.constructor(\"hidden=2\")();globalThis.answer=hidden;"},
 ];
