@@ -873,3 +873,16 @@ describe("runtime name resolution receiver declaration identity", () => {
     expect(observations).toEqual(expected);
   });
 });
+
+describe("runtime name resolution initialization activation", () => {
+  it("T253 P-R18-01 preserves intrinsic global values before cross-activation initialization", () => {
+    executeRevision12Cases("T253-P-R18-01", [
+      {"id":"local-eval-control","pass":"constantPropagate","source":"var value=1;var eval=function(){};eval(\"value=2\");globalThis.answer=value;","answer":1},
+      {"id":"local-Function-control","pass":"constantPropagate","source":"var value=1;var Function=function(){return function(){}};Function(\"value=2\")();globalThis.answer=value;","answer":1},
+      {"id":"local-root-control","pass":"constantPropagate","source":"var value=1;var globalThis={};globalThis.value=2;this.answer=value;","answer":1},
+      {"id":"eval-default-before-init","pass":"constantPropagate","source":"var value=1;h();var eval=function(){};function h(a=eval(\"value=2\")){}globalThis.answer=value;","answer":2},
+      {"id":"Function-default-before-init","pass":"constantPropagate","source":"var value=1;h();var Function=function(){return function(){}};function h(a=Function(\"value=2\")()){}globalThis.answer=value;","answer":2},
+      {"id":"root-default-before-init","pass":"constantPropagate","source":"var value=1;h();var globalThis={};function h(a=globalThis.value=2){}this.answer=value;","answer":2},
+    ]);
+  });
+});
