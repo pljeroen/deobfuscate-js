@@ -886,3 +886,233 @@ describe("runtime name resolution initialization activation", () => {
     ]);
   });
 });
+
+describe("runtime name resolution declaration kind admission", () => {
+  it("T254 E17-04 retains unsupported declaration kinds in own-constructor admission", () => {
+    const cases = [
+      {
+        "id": "using",
+        "source": "{using o={[Symbol.dispose](){}};o.constructor=function(){return function(){}};var value=1;o.constructor(\"value=2\")();globalThis.answer=value;}",
+        "required_parse": {
+          "completeness": "whole",
+          "mode": "module-capable",
+          "recoveredErrors": 0,
+          "warnings": [],
+          "sourceType": "script"
+        },
+        "expected_declaration": [
+          {
+            "parent": "VariableDeclaration",
+            "kind": "using",
+            "bindingKind": "const",
+            "id": "Identifier",
+            "owner": "Program"
+          }
+        ],
+        "execute_runtime": true,
+        "expected_successor_rhs": "Identifier",
+        "expected_successor_rhs_name": "value",
+        "expected_successor_rhs_value": null,
+        "expected_source_answer": 1,
+        "role": "DISCRIMINATING_E17_04_CONFORMANCE"
+      },
+      {
+        "id": "using-poisoned",
+        "source": "function strip(x){}{using o={[Symbol.dispose](){}};o.constructor=function(){return function(){}};strip(o);var value=1;o.constructor(\"value=2\")();globalThis.answer=value;}",
+        "required_parse": {
+          "completeness": "whole",
+          "mode": "module-capable",
+          "recoveredErrors": 0,
+          "warnings": [],
+          "sourceType": "script"
+        },
+        "expected_declaration": [
+          {
+            "parent": "VariableDeclaration",
+            "kind": "using",
+            "bindingKind": "const",
+            "id": "Identifier",
+            "owner": "Program"
+          }
+        ],
+        "execute_runtime": true,
+        "expected_successor_rhs": "Identifier",
+        "expected_successor_rhs_name": "value",
+        "expected_successor_rhs_value": null,
+        "expected_source_answer": 1,
+        "role": "SYNCHRONOUS_PRESERVATION_CONTROL"
+      },
+      {
+        "id": "let",
+        "source": "{let o={};o.constructor=function(){return function(){}};var value=1;o.constructor(\"value=2\")();globalThis.answer=value;}",
+        "required_parse": {
+          "completeness": "whole",
+          "mode": "module-capable",
+          "recoveredErrors": 0,
+          "warnings": [],
+          "sourceType": "script"
+        },
+        "expected_declaration": [
+          {
+            "parent": "VariableDeclaration",
+            "kind": "let",
+            "bindingKind": "let",
+            "id": "Identifier",
+            "owner": "Program"
+          }
+        ],
+        "execute_runtime": true,
+        "expected_successor_rhs": "NumericLiteral",
+        "expected_successor_rhs_name": null,
+        "expected_successor_rhs_value": 1,
+        "expected_source_answer": 1,
+        "role": "SYNCHRONOUS_PRESERVATION_CONTROL"
+      },
+      {
+        "id": "const",
+        "source": "{const o={};o.constructor=function(){return function(){}};var value=1;o.constructor(\"value=2\")();globalThis.answer=value;}",
+        "required_parse": {
+          "completeness": "whole",
+          "mode": "module-capable",
+          "recoveredErrors": 0,
+          "warnings": [],
+          "sourceType": "script"
+        },
+        "expected_declaration": [
+          {
+            "parent": "VariableDeclaration",
+            "kind": "const",
+            "bindingKind": "const",
+            "id": "Identifier",
+            "owner": "Program"
+          }
+        ],
+        "execute_runtime": true,
+        "expected_successor_rhs": "NumericLiteral",
+        "expected_successor_rhs_name": null,
+        "expected_successor_rhs_value": 1,
+        "expected_source_answer": 1,
+        "role": "SYNCHRONOUS_PRESERVATION_CONTROL"
+      },
+      {
+        "id": "var-function",
+        "source": "var value=1;function run(){var o={};o.constructor=function(){return function(){}};o.constructor(\"value=2\")();}run();globalThis.answer=value;",
+        "required_parse": {
+          "completeness": "whole",
+          "mode": "module-capable",
+          "recoveredErrors": 0,
+          "warnings": [],
+          "sourceType": "script"
+        },
+        "expected_declaration": [
+          {
+            "parent": "VariableDeclaration",
+            "kind": "var",
+            "bindingKind": "var",
+            "id": "Identifier",
+            "owner": "FunctionDeclaration"
+          }
+        ],
+        "execute_runtime": true,
+        "expected_successor_rhs": "NumericLiteral",
+        "expected_successor_rhs_name": null,
+        "expected_successor_rhs_value": 1,
+        "expected_source_answer": 1,
+        "role": "SYNCHRONOUS_PRESERVATION_CONTROL"
+      },
+      {
+        "id": "E05",
+        "source": "var value=1;({constructor:function(){return function(){}}}).constructor(\"value=2\")();globalThis.answer=value;",
+        "required_parse": {
+          "completeness": "whole",
+          "mode": "module-capable",
+          "recoveredErrors": 0,
+          "warnings": [],
+          "sourceType": "script"
+        },
+        "expected_declaration": [],
+        "execute_runtime": true,
+        "expected_successor_rhs": "NumericLiteral",
+        "expected_successor_rhs_name": null,
+        "expected_successor_rhs_value": 1,
+        "expected_source_answer": 1,
+        "role": "SYNCHRONOUS_PRESERVATION_CONTROL"
+      },
+      {
+        "id": "await-using-async",
+        "source": "var value=1;async function run(){await using o={[Symbol.asyncDispose](){}};o.constructor=function(){return function(){}};o.constructor(\"value=2\")();}run();globalThis.answer=value;",
+        "required_parse": {
+          "completeness": "whole",
+          "mode": "module-capable",
+          "recoveredErrors": 0,
+          "warnings": [],
+          "sourceType": "script"
+        },
+        "expected_declaration": [
+          {
+            "parent": "VariableDeclaration",
+            "kind": "await using",
+            "bindingKind": "const",
+            "id": "Identifier",
+            "owner": "FunctionDeclaration"
+          }
+        ],
+        "execute_runtime": false,
+        "expected_successor_rhs": "Identifier",
+        "expected_successor_rhs_name": "value",
+        "expected_successor_rhs_value": null,
+        "expected_source_answer": null,
+        "role": "PARSED_AST_CONTROL_NO_RUNTIME_KILL"
+      },
+      {
+        "id": "await-using-module",
+        "source": "export {};{await using o={[Symbol.asyncDispose](){}};o.constructor=function(){return function(){}};var value=1;o.constructor(\"value=2\")();globalThis.answer=value;}",
+        "required_parse": {
+          "completeness": "whole",
+          "mode": "module-capable",
+          "recoveredErrors": 0,
+          "warnings": [],
+          "sourceType": "module"
+        },
+        "expected_declaration": [
+          {
+            "parent": "VariableDeclaration",
+            "kind": "await using",
+            "bindingKind": "const",
+            "id": "Identifier",
+            "owner": "Program"
+          }
+        ],
+        "execute_runtime": false,
+        "expected_successor_rhs": "NumericLiteral",
+        "expected_successor_rhs_name": null,
+        "expected_successor_rhs_value": 1,
+        "expected_source_answer": null,
+        "role": "PARSED_AST_CONTROL_NO_RUNTIME_KILL"
+      }
+    ];
+    const results = cases.map(row => {
+      const parsed = parser.parseWithDiagnostics(row.source);
+      const parse = {completeness: parsed.completeness, mode: parsed.mode, recoveredErrors: parsed.recoveredErrors, warnings: parsed.warnings, sourceType: parsed.ast.program.sourceType};
+      const declarations: any[] = [];
+      babel.traverse(parsed.ast, {VariableDeclarator(path: any) {
+        if (path.node.id.type !== "Identifier" || path.node.id.name !== "o") return;
+        const binding = path.scope.getBinding("o");
+        const owner = path.findParent((parent: any) => parent.isFunction() || parent.isProgram());
+        declarations.push({parent: path.parentPath.node.type, kind: path.parentPath.node.kind, bindingKind: binding?.kind, id: path.node.id.type, owner: owner?.node.type});
+      }});
+      const output = passes.constantPropagate.run(parsed.ast, row.source);
+      const code = parser.generate(output);
+      const answers = nodes(output, "AssignmentExpression").filter((node: any) => node.left.type === "MemberExpression" && !node.left.computed && node.left.object.name === "globalThis" && node.left.property.name === "answer");
+      const rhs = answers.map((node: any) => ({type: node.right.type, name: node.right.name ?? null, value: node.right.value ?? null}));
+      return {id: row.id, source: row.source, parse, declarations, code, rhs, before: row.execute_runtime ? observe(row.source) : null, after: row.execute_runtime ? observe(code) : null};
+    });
+    const actual = results.map(({source, code, ...row}) => row);
+    const expected = cases.map(row => {
+      const runtime = row.execute_runtime ? {completion: {kind: "normal"}, globals: {answer: encode(1), side: {type: "absent"}, events: {type: "array", values: []}}, stdout: "", stderr: ""} : null;
+      return {id: row.id, parse: row.required_parse, declarations: row.expected_declaration, rhs: [{type: row.expected_successor_rhs, name: row.expected_successor_rhs_name, value: row.expected_successor_rhs_value}], before: runtime, after: runtime};
+    });
+    record("T254-P-R19-01", {results, actual, expected});
+    expect(actual).toEqual(expected);
+  });
+});
