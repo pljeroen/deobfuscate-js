@@ -267,6 +267,8 @@ export function runtimeNameFacts(ast: File): RuntimeNameFacts {
     if (objectBinding(binding) || linked.has(binding)) return false;
     const owner = activation(accessSite);
     if (activation(binding.path) !== owner) return false;
+    if (!binding.path.parentPath?.isVariableDeclaration()
+      || !["var", "let", "const"].includes(binding.path.parentPath.node.kind)) return false;
     if (owner !== program && (owner.node.async || owner.node.generator)) return false;
     // Only direct expression statements in a non-repeating execution region prove order.
     let accessOperation = accessSite;
