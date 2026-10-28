@@ -205,9 +205,17 @@ function requiresDeclarationInstantiationRetention(candidate: any, facts: Runtim
       if (path.node.id) ids = { [path.node.id.name]: path.node.id };
     } else if (path.isImportDeclaration()) ids = t.getBindingIdentifiers(path.node);
     for (const name of Object.keys(ids)) {
-      const binding = path.isFunctionDeclaration()
-        ? path.parentPath?.scope.getBinding(name)
-        : path.scope.getBinding(name);
+      let binding = path.scope.getBinding(name);
+      if (path.isFunctionDeclaration()) {
+        binding = path.parentPath?.scope.getBinding(name);
+      } else if (
+        path.isVariableDeclarator() &&
+        path.parentPath?.isVariableDeclaration() &&
+        path.parentPath.node.kind === "var"
+      ) {
+        const declarationScope = path.scope.getFunctionParent() ?? path.scope.getProgramParent();
+        binding = declarationScope.getBinding(name);
+      }
       if (facts.observed(binding)) retained = true;
       if (binding?.referencePaths.some(isExternal) || binding?.constantViolations.some(isExternal)) retained = true;
       if (path.isFunctionDeclaration()) {

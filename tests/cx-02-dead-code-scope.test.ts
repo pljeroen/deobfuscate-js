@@ -1177,6 +1177,27 @@ const linkageRows = [
 ] as const;
 
 describe("CX-02 selected dead-code branch scope preservation", () => {
+  it("var declarator declaring scope composition: catch_parameter_discarded_consequent", () => {
+    const source = "try{throw 0}catch(x){if(false){var x=f();}} globalThis.answer=x;";
+    const expected: DeclarationInstantiationOutcome = {
+      completion: "normal",
+      errorName: null,
+      globals: { answer: declarationInstantiationValue(undefined) },
+    };
+    expect(executeDeclarationInstantiation(source, ["answer"])).toEqual(expected);
+    expect(declarationCounts(source, ["x"]).x).toBe(1);
+
+    const results = [filterSafePasses(allASTPasses), allASTPasses].map((passes) => {
+      const result = runPipelineWithReport(source, passes, [formatPass]);
+      return {
+        outcome: executeDeclarationInstantiation(result.code, ["answer"]),
+        declarationCount: declarationCounts(result.code, ["x"]).x,
+      };
+    });
+    expect(results.map(({ outcome }) => outcome)).toEqual([expected, expected]);
+    expect(results.map(({ declarationCount }) => declarationCount)).toEqual([1, 1]);
+  });
+
   it("FunctionDeclaration declaring scope composition: consequent_parameter_shadow", () => {
     const source = "if(false) function g(g){}; globalThis.answer=g;";
     const expected: DeclarationInstantiationOutcome = {

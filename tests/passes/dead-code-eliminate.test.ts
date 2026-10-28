@@ -172,6 +172,74 @@ function functionDeclarationDeclaringScopeFacts(
   };
 }
 
+function variableDeclaratorVarScopeFacts(
+  source: string,
+  name: string,
+  site: "branch" | "tail",
+): {
+  bindingsDistinct: boolean;
+  contrastKind: string;
+  contrastScopeType: string;
+  contrastReferences: number;
+  contrastViolations: number;
+  targetKind: string;
+  targetScopeType: string;
+  targetReferences: number;
+  targetViolations: number;
+  externalTargetReferences: number;
+  targetObserved: boolean;
+} {
+  const ast = parse(source);
+  let declaration: any;
+  traverse(ast, {
+    VariableDeclarator(path: any) {
+      if (!Object.prototype.hasOwnProperty.call(t.getBindingIdentifiers(path.node.id), name)) return;
+      expect(declaration, `unique var declarator ${name}`).toBeUndefined();
+      declaration = path;
+    },
+  });
+  expect(declaration, `var declarator ${name}`).toBeDefined();
+
+  const contrastBinding = declaration.scope.getBinding(name);
+  const targetScope = declaration.scope.getFunctionParent() ?? declaration.scope.getProgramParent();
+  const targetBinding = targetScope.getBinding(name);
+  expect(contrastBinding, `contrast binding ${name}`).toBeDefined();
+  expect(targetBinding, `target binding ${name}`).toBeDefined();
+
+  let candidate = declaration;
+  if (site === "branch") {
+    for (let current = declaration; current?.parentPath; current = current.parentPath) {
+      const parent = current.parentPath;
+      if (!parent.isIfStatement() || !t.isBooleanLiteral(parent.node.test)) continue;
+      const discarded = parent.get(parent.node.test.value ? "alternate" : "consequent");
+      if (discarded?.node && containsPath(declaration, discarded)) {
+        candidate = discarded;
+        break;
+      }
+    }
+  } else {
+    while (candidate?.parentPath && !candidate.isStatement()) candidate = candidate.parentPath;
+  }
+  expect(candidate?.node, `deletion candidate for ${name}`).toBeDefined();
+
+  const facts = runtimeNameFacts(ast);
+  return {
+    bindingsDistinct: contrastBinding !== targetBinding,
+    contrastKind: contrastBinding.kind,
+    contrastScopeType: contrastBinding.scope.path.node.type,
+    contrastReferences: contrastBinding.referencePaths.length,
+    contrastViolations: contrastBinding.constantViolations.length,
+    targetKind: targetBinding.kind,
+    targetScopeType: targetBinding.scope.path.node.type,
+    targetReferences: targetBinding.referencePaths.length,
+    targetViolations: targetBinding.constantViolations.length,
+    externalTargetReferences: targetBinding.referencePaths.filter(
+      (path: any) => !containsPath(path, candidate),
+    ).length,
+    targetObserved: facts.observed(targetBinding),
+  };
+}
+
 function directlyParentedFunctionDeclarationCount(
   source: string,
   name: string,
@@ -400,6 +468,53 @@ describe("dead code elimination", () => {
         });
         expect(executeFresh(transformed, ["answer"])).toEqual(sourceOutcome);
         expect(directlyParentedFunctionDeclarationCount(transformed, "g", parentType)).toBe(1);
+      },
+    );
+
+    const variableDeclaratorDeclaringScopeCases = [
+      {
+        id: "catch_parameter_discarded_consequent",
+        source: "try{throw 0}catch(x){if(false){var x=f();}} globalThis.answer=x;",
+        site: "branch" as const,
+        expected: normal({ answer: present(undefined) }),
+      },
+      {
+        id: "catch_parameter_discarded_alternate",
+        source: "try{throw 0}catch(x){if(true);else var x=f();} globalThis.answer=x;",
+        site: "branch" as const,
+        expected: normal({ answer: present(undefined) }),
+      },
+      {
+        id: "catch_parameter_post_throw_tail",
+        source: "globalThis.answer=x;try{throw 0}catch(x){throw new Error(\"e\"); var x=f();}",
+        site: "tail" as const,
+        expected: thrown("Error", { answer: present(undefined) }),
+      },
+    ] as const;
+
+    it.each(variableDeclaratorDeclaringScopeCases)(
+      "var declarator declaring scope: $id",
+      ({ source, site, expected }) => {
+        const facts = variableDeclaratorVarScopeFacts(source, "x", site);
+        const transformed = dce(source);
+        const sourceOutcome = executeFresh(source, ["answer"]);
+
+        expect(sourceOutcome).toEqual(expected);
+        expect(facts).toEqual({
+          bindingsDistinct: true,
+          contrastKind: "let",
+          contrastScopeType: "CatchClause",
+          contrastReferences: 0,
+          contrastViolations: 0,
+          targetKind: "var",
+          targetScopeType: "Program",
+          targetReferences: 1,
+          targetViolations: 0,
+          externalTargetReferences: 1,
+          targetObserved: false,
+        });
+        expect(executeFresh(transformed, ["answer"])).toEqual(sourceOutcome);
+        expect(declarationCount(transformed, "x")).toBe(1);
       },
     );
 
