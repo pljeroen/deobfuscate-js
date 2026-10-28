@@ -205,7 +205,9 @@ function requiresDeclarationInstantiationRetention(candidate: any, facts: Runtim
       if (path.node.id) ids = { [path.node.id.name]: path.node.id };
     } else if (path.isImportDeclaration()) ids = t.getBindingIdentifiers(path.node);
     for (const name of Object.keys(ids)) {
-      const binding = path.scope.getBinding(name);
+      const binding = path.isFunctionDeclaration()
+        ? path.parentPath?.scope.getBinding(name)
+        : path.scope.getBinding(name);
       if (facts.observed(binding)) retained = true;
       if (binding?.referencePaths.some(isExternal) || binding?.constantViolations.some(isExternal)) retained = true;
       if (path.isFunctionDeclaration()) {

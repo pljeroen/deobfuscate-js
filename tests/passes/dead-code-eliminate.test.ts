@@ -115,6 +115,77 @@ function declarationBindingFacts(
   };
 }
 
+type FunctionDeclarationParent = "IfStatement" | "LabeledStatement";
+
+function functionDeclarationDeclaringScopeFacts(
+  source: string,
+  name: string,
+  parentType: FunctionDeclarationParent,
+): {
+  bindingsDistinct: boolean;
+  ownKind: string;
+  declaringKind: string;
+  ownReferences: number;
+  ownViolations: number;
+  declaringReferences: number;
+  declaringViolations: number;
+  externalDeclaringReferences: number;
+  declaringObserved: boolean;
+  matchingOwner: boolean;
+} {
+  const ast = parse(source);
+  let declaration: any;
+  let program: any;
+  traverse(ast, {
+    Program(path: any) {
+      program = path;
+    },
+    FunctionDeclaration(path: any) {
+      if (path.node.id?.name === name && path.parentPath?.node.type === parentType) {
+        expect(declaration, `unique outer declaration ${name}`).toBeUndefined();
+        declaration = path;
+      }
+    },
+  });
+  expect(declaration, `outer declaration ${name}`).toBeDefined();
+
+  const ownBinding = declaration?.scope.getBinding(name);
+  const declaringBinding = declaration?.parentPath.scope.getBinding(name);
+  const owner = declaration?.getFunctionParent() ?? program;
+  expect(ownBinding, `own binding ${name}`).toBeDefined();
+  expect(declaringBinding, `declaring binding ${name}`).toBeDefined();
+  expect(owner, `owner ${name}`).toBeDefined();
+
+  const facts = runtimeNameFacts(ast);
+  return {
+    bindingsDistinct: ownBinding !== declaringBinding,
+    ownKind: ownBinding?.kind ?? "missing",
+    declaringKind: declaringBinding?.kind ?? "missing",
+    ownReferences: ownBinding?.referencePaths.length ?? -1,
+    ownViolations: ownBinding?.constantViolations.length ?? -1,
+    declaringReferences: declaringBinding?.referencePaths.length ?? -1,
+    declaringViolations: declaringBinding?.constantViolations.length ?? -1,
+    externalDeclaringReferences:
+      declaringBinding?.referencePaths.filter((path: any) => !containsPath(path, declaration.parentPath)).length ?? -1,
+    declaringObserved: facts.observed(declaringBinding),
+    matchingOwner: facts.owners.get(name)?.has(owner) ?? false,
+  };
+}
+
+function directlyParentedFunctionDeclarationCount(
+  source: string,
+  name: string,
+  parentType: FunctionDeclarationParent,
+): number {
+  let count = 0;
+  traverse(parse(source), {
+    FunctionDeclaration(path: any) {
+      if (path.node.id?.name === name && path.parentPath?.node.type === parentType) count += 1;
+    },
+  });
+  return count;
+}
+
 function declarationCount(code: string, name: string): number {
   let count = 0;
   traverse(parse(code), {
@@ -283,6 +354,55 @@ describe("dead code elimination", () => {
   });
 
   describe("declaration-instantiation retention", () => {
+    const functionDeclarationDeclaringScopeCases = [
+      {
+        id: "consequent_parameter_shadow",
+        source: "if(false) function g(g){}; globalThis.answer=g;",
+        parentType: "IfStatement" as const,
+        ownKind: "param",
+        expected: normal({ answer: present(undefined) }),
+      },
+      {
+        id: "alternate_var_shadow",
+        source: "if(true);else function g(){var g;} globalThis.answer=g;",
+        parentType: "IfStatement" as const,
+        ownKind: "var",
+        expected: normal({ answer: present(undefined) }),
+      },
+      {
+        id: "labelled_post_throw_inner_function_shadow",
+        source: "globalThis.answer=g();throw new Error('expected');L:function g(){function g(){}return 5;}",
+        parentType: "LabeledStatement" as const,
+        ownKind: "hoisted",
+        expected: thrown("Error", { answer: present(5) }),
+      },
+    ] as const;
+
+    it.each(functionDeclarationDeclaringScopeCases)(
+      "FunctionDeclaration declaring scope: $id",
+      ({ source, parentType, ownKind, expected }) => {
+        const facts = functionDeclarationDeclaringScopeFacts(source, "g", parentType);
+        const transformed = dce(source);
+        const sourceOutcome = executeFresh(source, ["answer"]);
+
+        expect(sourceOutcome).toEqual(expected);
+        expect(facts).toEqual({
+          bindingsDistinct: true,
+          ownKind,
+          declaringKind: "hoisted",
+          ownReferences: 0,
+          ownViolations: 0,
+          declaringReferences: 1,
+          declaringViolations: 0,
+          externalDeclaringReferences: 1,
+          declaringObserved: false,
+          matchingOwner: false,
+        });
+        expect(executeFresh(transformed, ["answer"])).toEqual(sourceOutcome);
+        expect(directlyParentedFunctionDeclarationCount(transformed, "g", parentType)).toBe(1);
+      },
+    );
+
     it("preserves the W-DI-01 Annex-B owner binding in a discarded consequent", () => {
       const source = "if(false) function f(){}; globalThis.answer=f;";
       const expected = normal({ answer: present(undefined) });
