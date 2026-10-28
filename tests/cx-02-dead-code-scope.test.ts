@@ -803,6 +803,124 @@ function safeAndAll(
   });
 }
 
+type DeclarationInstantiationOutcome = {
+  completion: "normal" | "throw";
+  errorName: string | null;
+  globals: Record<string, { present: boolean; value?: unknown }>;
+};
+
+function declarationInstantiationValue(value: unknown): { present: boolean; value: unknown } {
+  return { present: true, value: value === undefined ? "<undefined>" : value };
+}
+
+function executeDeclarationInstantiation(
+  source: string,
+  observed: readonly string[],
+): DeclarationInstantiationOutcome {
+  const context = vm.createContext(Object.create(null));
+  const globals = (): Record<string, { present: boolean; value?: unknown }> => Object.fromEntries(
+    observed.map((name) => {
+      const isPresent = Object.prototype.hasOwnProperty.call(context, name);
+      return [name, isPresent ? declarationInstantiationValue(Reflect.get(context, name)) : { present: false }];
+    }),
+  );
+  try {
+    vm.runInContext(source, context, { timeout: 2_000 });
+    return { completion: "normal", errorName: null, globals: globals() };
+  } catch (error: unknown) {
+    const errorName =
+      typeof error === "object" && error !== null && "name" in error
+        ? String((error as { name: unknown }).name)
+        : typeof error;
+    return { completion: "throw", errorName, globals: globals() };
+  }
+}
+
+function declarationTypeCount(source: string, declarationType: string): number {
+  let count = 0;
+  traverse(parse(source), {
+    enter(path: { node: t.Node }) {
+      if (path.node.type === declarationType) count += 1;
+    },
+  });
+  return count;
+}
+
+const declarationInstantiationCompositionCases = [
+  {
+    id: "W-DI-01",
+    source: "if(false) function f(){}; globalThis.answer=f;",
+    observed: ["answer"],
+    expected: {
+      completion: "normal",
+      errorName: null,
+      globals: { answer: declarationInstantiationValue(undefined) },
+    } as DeclarationInstantiationOutcome,
+    declarationType: "FunctionDeclaration",
+    finalDeclarationCount: 1,
+  },
+  {
+    id: "W-DI-02",
+    source: "function probe(){globalThis.answer=hidden;return;var hidden;}probe();",
+    observed: ["answer"],
+    expected: {
+      completion: "normal",
+      errorName: null,
+      globals: { answer: declarationInstantiationValue(undefined) },
+    } as DeclarationInstantiationOutcome,
+    declarationType: "VariableDeclarator",
+    finalDeclarationCount: 1,
+  },
+  {
+    id: "branch-var",
+    source: "function probe(){if(false){var branchCell;}globalThis.answer=branchCell;}probe();",
+    observed: ["answer"],
+    expected: {
+      completion: "normal",
+      errorName: null,
+      globals: { answer: declarationInstantiationValue(undefined) },
+    } as DeclarationInstantiationOutcome,
+    declarationType: "VariableDeclarator",
+    finalDeclarationCount: 1,
+  },
+  {
+    id: "W-DI-TDZ-LET",
+    source: "function probe(){globalThis.answer=typeof hidden;return;let hidden;}probe();",
+    observed: ["answer"],
+    expected: {
+      completion: "throw",
+      errorName: "ReferenceError",
+      globals: { answer: { present: false } },
+    } as DeclarationInstantiationOutcome,
+    declarationType: "VariableDeclarator",
+    finalDeclarationCount: 1,
+  },
+  {
+    id: "W-DI-TDZ-CLASS",
+    source: "function probe(){globalThis.answer=typeof Hidden;return;class Hidden{}}probe();",
+    observed: ["answer"],
+    expected: {
+      completion: "throw",
+      errorName: "ReferenceError",
+      globals: { answer: { present: false } },
+    } as DeclarationInstantiationOutcome,
+    declarationType: "ClassDeclaration",
+    finalDeclarationCount: 1,
+  },
+  {
+    id: "internal-only control",
+    source: "function probe(){if(false){var local;local=1;globalThis.dead=local;}globalThis.answer=42;}probe();",
+    observed: ["answer", "dead"],
+    expected: {
+      completion: "normal",
+      errorName: null,
+      globals: { answer: declarationInstantiationValue(42), dead: { present: false } },
+    } as DeclarationInstantiationOutcome,
+    declarationType: "VariableDeclarator",
+    finalDeclarationCount: 0,
+  },
+] as const;
+
 const coveringAxes = {
   declaration: ["class", "strict_ordinary_function", "async_function", "generator_function", "async_generator_function", "sloppy_ordinary_annex_b", "used_let_base_wrong", "used_const_base_wrong"],
   site: ["in_block_before", "in_block_after", "after_block"],
@@ -1059,6 +1177,19 @@ const linkageRows = [
 ] as const;
 
 describe("CX-02 selected dead-code branch scope preservation", () => {
+  it.each(declarationInstantiationCompositionCases)(
+    "production composition: $id",
+    ({ source, observed, expected, declarationType, finalDeclarationCount }) => {
+      expect(executeDeclarationInstantiation(source, observed)).toEqual(expected);
+
+      for (const passes of [filterSafePasses(allASTPasses), allASTPasses]) {
+        const result = runPipelineWithReport(source, passes, [formatPass]);
+        expect(executeDeclarationInstantiation(result.code, observed)).toEqual(expected);
+        expect(declarationTypeCount(result.code, declarationType)).toBe(finalDeclarationCount);
+      }
+    },
+  );
+
   const classCases = [
     {
       name: "true consequent keeps the exact MISSED-02 class local",

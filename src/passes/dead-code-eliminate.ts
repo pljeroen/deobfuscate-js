@@ -28,7 +28,7 @@ export const deadCodeEliminatePass: ASTPass = {
         if (!testResult.confident) return;
 
         const discarded = path.get(testResult.value ? "alternate" : "consequent");
-        if (discarded.node && retainsRuntimeBinding(discarded, facts)) return;
+        if (discarded.node && requiresDeclarationInstantiationRetention(discarded, facts)) return;
 
         if (testResult.value) {
           // if(true) { A } else { B } -> A
@@ -88,7 +88,7 @@ export const deadCodeEliminatePass: ASTPass = {
         for (let i = 0; i < body.length; i++) {
           if (foundTerminator) {
             // FunctionDeclarations are hoisted — they're available before the return
-            if (!t.isFunctionDeclaration(body[i]) && !retainsRuntimeBinding(path.get("body")[i], facts)) {
+            if (!t.isFunctionDeclaration(body[i]) && !requiresDeclarationInstantiationRetention(path.get("body")[i], facts)) {
               toRemove.push(i);
             }
             continue;
@@ -190,8 +190,14 @@ export const deadCodeEliminatePass: ASTPass = {
  * Inspect bindings at their declaration scopes, stopping at private function/class
  * bodies so a nested observer does not make an unrelated outer carrier live.
  */
-function retainsRuntimeBinding(site: any, facts: RuntimeNameFacts): boolean {
+function requiresDeclarationInstantiationRetention(candidate: any, facts: RuntimeNameFacts): boolean {
   let retained = false;
+  const isExternal = (edge: any): boolean => {
+    for (let path = edge; path; path = path.parentPath) {
+      if (path === candidate) return false;
+    }
+    return true;
+  };
   const inspect = (path: any): void => {
     let ids: Record<string, t.Identifier> = {};
     if (path.isVariableDeclarator()) ids = t.getBindingIdentifiers(path.node.id);
@@ -199,15 +205,17 @@ function retainsRuntimeBinding(site: any, facts: RuntimeNameFacts): boolean {
       if (path.node.id) ids = { [path.node.id.name]: path.node.id };
     } else if (path.isImportDeclaration()) ids = t.getBindingIdentifiers(path.node);
     for (const name of Object.keys(ids)) {
-      if (facts.observed(path.scope.getBinding(name))) retained = true;
+      const binding = path.scope.getBinding(name);
+      if (facts.observed(binding)) retained = true;
+      if (binding?.referencePaths.some(isExternal) || binding?.constantViolations.some(isExternal)) retained = true;
       if (path.isFunctionDeclaration()) {
         const owner = path.getFunctionParent() ?? path.findParent((p: any) => p.isProgram());
         if (facts.owners.get(name)?.has(owner)) retained = true;
       }
     }
   };
-  inspect(site);
-  if (!site.isFunction() && !site.isClass()) site.traverse({
+  inspect(candidate);
+  if (!candidate.isFunction() && !candidate.isClass()) candidate.traverse({
     enter(path: any) {
       inspect(path);
       if (retained) path.stop();
