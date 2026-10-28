@@ -438,7 +438,7 @@ describe("dead code elimination", () => {
         expected: normal({ answer: present(undefined) }),
       },
       {
-        id: "labelled_post_throw_inner_function_shadow",
+        id: "labelled_throw_shadow",
         source: "globalThis.answer=g();throw new Error('expected');L:function g(){function g(){}return 5;}",
         parentType: "LabeledStatement" as const,
         ownKind: "hoisted",
@@ -823,6 +823,271 @@ describe("dead code elimination", () => {
 
       const transformed = generate(deadCodeEliminatePass.run(ast));
       expect(declarationCount(transformed, name)).toBe(1);
+    });
+  });
+
+  describe("declaration binding ownership", () => {
+    it("Pass 3 keeps the Program var behind an unused catch parameter", () => {
+      const source = "try{throw 0}catch(x){if(false){var x=1;}} globalThis.answer=x;";
+      const expected = normal({ answer: present(undefined) });
+      expect(executeFresh(source, ["answer"])).toEqual(expected);
+      expect(variableDeclaratorVarScopeFacts(source, "x", "branch")).toEqual({
+        bindingsDistinct: true,
+        contrastKind: "let",
+        contrastScopeType: "CatchClause",
+        contrastReferences: 0,
+        contrastViolations: 0,
+        targetKind: "var",
+        targetScopeType: "Program",
+        targetReferences: 1,
+        targetViolations: 0,
+        externalTargetReferences: 1,
+        targetObserved: false,
+      });
+
+      const transformed = dce(source);
+      const declarations: string[] = [];
+      traverse(parse(transformed), {
+        VariableDeclarator(path: { node: t.VariableDeclarator; parentPath: any; scope: any }) {
+          if (t.isIdentifier(path.node.id, { name: "x" }) && path.parentPath.isVariableDeclaration()) {
+            declarations.push(path.parentPath.node.kind);
+          }
+        },
+      });
+      expect({ outcome: executeFresh(transformed, ["answer"]), declarations }).toEqual({
+        outcome: expected, declarations: ["var"],
+      });
+    });
+
+    it("Pass 4 keeps the parent function binding behind an unused parameter", () => {
+      const source = "function outer(){function used(used){return 7;}globalThis.answer=used();}outer();";
+      const expected = normal({ answer: present(7) });
+      expect(executeFresh(source, ["answer"])).toEqual(expected);
+      const ast = parse(source);
+      let outer: any;
+      let declaration: any;
+      traverse(ast, {
+        FunctionDeclaration(path: { node: t.FunctionDeclaration; scope: any }) {
+          if (path.node.id?.name === "outer") outer = path;
+          if (path.node.id?.name === "used") declaration = path;
+        },
+      });
+      expect(outer).toBeDefined();
+      expect(declaration).toBeDefined();
+      const own = declaration.scope.getOwnBinding("used");
+      const parent = outer.scope.getOwnBinding("used");
+      expect(own).toBeDefined();
+      expect(parent).toBeDefined();
+      expect({
+        distinct: own !== parent,
+        ownOwnerIsUsed: own.scope.path === declaration,
+        parentOwnerIsOuter: parent.scope.path === outer,
+        declarationIsParentBinding: parent.path === declaration,
+        own: [own.kind, own.referencePaths.length, own.constantViolations.length],
+        parent: [parent.kind, parent.referencePaths.length, parent.constantViolations.length],
+      }).toEqual({
+        distinct: true,
+        ownOwnerIsUsed: true,
+        parentOwnerIsOuter: true,
+        declarationIsParentBinding: true,
+        own: ["param", 0, 0],
+        parent: ["hoisted", 1, 0],
+      });
+
+      const transformed = generate(deadCodeEliminatePass.run(ast));
+      let functions = 0;
+      traverse(parse(transformed), {
+        FunctionDeclaration(path: { node: t.FunctionDeclaration; scope: any }) {
+          if (path.node.id?.name === "used") functions += 1;
+        },
+      });
+      expect({ outcome: executeFresh(transformed, ["answer"]), functions }).toEqual({
+        outcome: expected, functions: 1,
+      });
+    });
+
+    it("removes the discarded carrier of a nested private eval observer", () => {
+      const source = "if(false){(function(){var priv;eval('priv');})();}";
+      const expected = normal({ answer: absent() });
+      expect(executeFresh(source, ["answer"])).toEqual(expected);
+      const transformed = dce(source);
+      expect({
+        outcome: executeFresh(transformed, ["answer"]),
+        branches: nodeTypeCount(transformed, "IfStatement"),
+        privateDeclarations: declarationCount(transformed, "priv"),
+      }).toEqual({ outcome: expected, branches: 0, privateDeclarations: 0 });
+    });
+
+    it.each([
+      { kind: "let", source: "function probe(){var h=globalThis.seed;{globalThis.answer=typeof h;let h;}}probe();" },
+      { kind: "const", source: "function probe(){var h=globalThis.seed;{globalThis.answer=typeof h;const h=1;}}probe();" },
+    ])("Pass 3 preserves the referenced $kind cell beside an unused outer var", ({ kind, source }) => {
+      const expected = thrown("ReferenceError", { answer: absent() });
+      expect(executeFresh(source, ["answer"])).toEqual(expected);
+      const ast = parse(source);
+      let outer: any;
+      let lexical: any;
+      traverse(ast, {
+        FunctionDeclaration(path: { node: t.FunctionDeclaration; scope: any }) {
+          if (path.node.id?.name === "probe") outer = path.scope.getOwnBinding("h");
+        },
+        VariableDeclarator(path: { node: t.VariableDeclarator; parentPath: any; scope: any }) {
+          if (t.isIdentifier(path.node.id, { name: "h" }) &&
+              path.parentPath.isVariableDeclaration({ kind })) lexical = path.scope.getOwnBinding("h");
+        },
+      });
+      expect(outer).toBeDefined();
+      expect(lexical).toBeDefined();
+      expect({
+        distinct: outer !== lexical,
+        outer: [outer.kind, outer.scope.path.node.type, outer.referencePaths.length, outer.constantViolations.length],
+        lexical: [lexical.kind, lexical.scope.path.node.type, lexical.referencePaths.length, lexical.constantViolations.length],
+      }).toEqual({
+        distinct: true,
+        outer: ["var", "FunctionDeclaration", 0, 0],
+        lexical: [kind, "BlockStatement", 1, 0],
+      });
+
+      const transformed = generate(deadCodeEliminatePass.run(ast));
+      const declarations: string[] = [];
+      traverse(parse(transformed), {
+        VariableDeclarator(path: { node: t.VariableDeclarator; parentPath: any; scope: any }) {
+          if (t.isIdentifier(path.node.id, { name: "h" }) && path.parentPath.isVariableDeclaration()) {
+            declarations.push(path.parentPath.node.kind);
+          }
+        },
+      });
+      expect({ outcome: executeFresh(transformed, ["answer"]), declarations }).toEqual({
+        outcome: expected, declarations: ["var", kind],
+      });
+    });
+  });
+
+  describe("initialized var binding effects", () => {
+    function bindingEffects(source: string) {
+      const ast = parse(source);
+      let declaration: any;
+      const catches: any[] = [];
+      traverse(ast, {
+        CatchClause(path: any) {
+          catches.push(path.scope.getOwnBinding("x"));
+        },
+        VariableDeclarator(path: any) {
+          if (t.isIdentifier(path.node.id, { name: "x" })) {
+            expect(declaration).toBeUndefined();
+            declaration = path;
+          }
+        },
+      });
+      expect(declaration).toBeDefined();
+      const target = declaration.scope.getBinding("x");
+      const ownerScope = declaration.scope.getFunctionParent() ?? declaration.scope.getProgramParent();
+      const owner = ownerScope.getOwnBinding("x");
+      expect(target).toBeDefined();
+      expect(owner).toBeDefined();
+      const facts = runtimeNameFacts(ast);
+      return {
+        distinct: target !== owner,
+        initialized: declaration.node.init !== null,
+        owner: [owner.kind, owner.scope.path.node.type, owner.referencePaths.length, owner.constantViolations.length],
+        target: [target.kind, target.scope.path.node.type, target.referencePaths.length, target.constantViolations.length],
+        ownerObserved: facts.observed(owner),
+        targetObserved: facts.observed(target),
+        targetCatchOrdinal: catches.indexOf(target),
+      };
+    }
+
+    function retainedInitializers(code: string): boolean[] {
+      const retained: boolean[] = [];
+      traverse(parse(code), {
+        VariableDeclarator(path: any) {
+          if (t.isIdentifier(path.node.id, { name: "x" }) && path.parentPath.isVariableDeclaration({ kind: "var" })) {
+            retained.push(path.node.init !== null);
+          }
+        },
+      });
+      return retained;
+    }
+
+    it("keeps an executed initializer writing a referenced catch cell", () => {
+      const source = "try{throw 0}catch(x){var x={v:5};globalThis.answer=x.v;}";
+      const expected = normal({ answer: present(5) });
+      expect(executeFresh(source, ["answer"])).toEqual(expected);
+      expect(bindingEffects(source)).toEqual({
+        distinct: true, initialized: true,
+        owner: ["var", "Program", 0, 0], target: ["let", "CatchClause", 1, 0],
+        ownerObserved: false, targetObserved: false, targetCatchOrdinal: 0,
+      });
+      const output = dce(source);
+      expect({ outcome: executeFresh(output, ["answer"]), initializers: retainedInitializers(output) })
+        .toEqual({ outcome: expected, initializers: [true] });
+    });
+
+    it.each([
+      { id: "no-init", source: "try{throw 7}catch(x){var x;globalThis.answer=x;}", answer: 7,
+        initialized: false, references: 1, violations: 0, observed: false, retained: [] },
+      { id: "dead-targets", source: "try{throw 0}catch(x){var x={v:5};}globalThis.answer=3;", answer: 3,
+        initialized: true, references: 0, violations: 0, observed: false, retained: [] },
+      { id: "write-edge", source: "try{throw 0}catch(x){var x={v:5};x=9;}globalThis.answer=3;", answer: 3,
+        initialized: true, references: 0, violations: 1, observed: false, retained: [true] },
+      { id: "observed", source: "try{throw 0}catch(x){var x={v:5};globalThis.answer=eval('x.v');}", answer: 5,
+        initialized: true, references: 0, violations: 0, observed: true, retained: [true] },
+    ])("initializer effect precision: $id", ({ source, answer, initialized, references, violations, observed, retained }) => {
+      const expected = normal({ answer: present(answer) });
+      expect(executeFresh(source, ["answer"])).toEqual(expected);
+      expect(bindingEffects(source)).toMatchObject({
+        distinct: true, initialized,
+        owner: ["var", "Program", 0, 0],
+        target: ["let", "CatchClause", references, violations],
+        targetObserved: observed, targetCatchOrdinal: 0,
+      });
+      const output = dce(source);
+      expect({ outcome: executeFresh(output, ["answer"]), initializers: retainedInitializers(output) })
+        .toEqual({ outcome: expected, initializers: retained });
+    });
+
+    it("keeps an initializer whose catch target alone is dynamically observed", () => {
+      const source = "function f(){try{throw 0}catch(x){var x={v:5};globalThis.answer=eval('x.v');}}f();";
+      const expected = normal({ answer: present(5) });
+      expect(executeFresh(source, ["answer"])).toEqual(expected);
+      expect(bindingEffects(source)).toEqual({
+        distinct: true, initialized: true,
+        owner: ["var", "FunctionDeclaration", 0, 0], target: ["let", "CatchClause", 0, 0],
+        ownerObserved: false, targetObserved: true, targetCatchOrdinal: 0,
+      });
+      const output = dce(source);
+      expect({ outcome: executeFresh(output, ["answer"]), initializers: retainedInitializers(output) })
+        .toEqual({ outcome: expected, initializers: [true] });
+    });
+
+    it("preserves initializer effects across the finite static owner and nearest-catch boundaries", () => {
+      const rows = [
+        { id: "strict", source: "'use strict';try{throw 0}catch(x){var x={v:5};globalThis.answer=x.v;}", owner: "Program", distinct: true, target: 0 },
+        { id: "function", source: "function probe(){try{throw 0}catch(x){var x={v:5};globalThis.answer=x.v;}}probe();", owner: "FunctionDeclaration", distinct: true, target: 0 },
+        { id: "static", source: "class Holder{static{try{throw 0}catch(x){var x={v:5};globalThis.answer=x.v;}}}", owner: "StaticBlock", distinct: true, target: 0 },
+        { id: "nearest", source: "try{throw {v:1}}catch(x){try{throw 0}catch(x){{var x={v:5};globalThis.answer=x.v;}}globalThis.outer=x.v;}", owner: "Program", distinct: true, target: 1 },
+        { id: "function-boundary", source: "try{throw 9}catch(x){function probe(){var x={v:5};globalThis.answer=x.v;}probe();}", owner: "FunctionDeclaration", distinct: false, target: -1 },
+        { id: "static-boundary", source: "try{throw 9}catch(x){class Holder{static{var x={v:5};globalThis.answer=x.v;}}}", owner: "StaticBlock", distinct: false, target: -1 },
+      ];
+      const expected = rows.map((row) => ({
+        id: row.id,
+        outcome: normal({ answer: present(5), outer: row.id === "nearest" ? present(1) : absent() }),
+        initializers: [true],
+      }));
+      for (const [index, row] of rows.entries()) {
+        expect(executeFresh(row.source, ["answer", "outer"]), row.id).toEqual(expected[index].outcome);
+        expect(bindingEffects(row.source), row.id).toEqual({
+          distinct: row.distinct, initialized: true,
+          owner: ["var", row.owner, row.distinct ? 0 : 1, 0],
+          target: row.distinct ? ["let", "CatchClause", 1, 0] : ["var", row.owner, 1, 0],
+          ownerObserved: false, targetObserved: false, targetCatchOrdinal: row.target,
+        });
+      }
+      const actual = rows.map((row) => {
+        const output = dce(row.source);
+        return { id: row.id, outcome: executeFresh(output, ["answer", "outer"]), initializers: retainedInitializers(output) };
+      });
+      expect(actual).toEqual(expected);
     });
   });
 });

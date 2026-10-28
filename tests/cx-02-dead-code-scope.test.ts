@@ -1177,6 +1177,119 @@ const linkageRows = [
 ] as const;
 
 describe("CX-02 selected dead-code branch scope preservation", () => {
+  it("preserves the initialized catch write through both production compositions", () => {
+    const source = "try{throw 0}catch(x){var x={v:5};globalThis.answer=x.v;}";
+    const expected: DeclarationInstantiationOutcome = {
+      completion: "normal", errorName: null,
+      globals: { answer: declarationInstantiationValue(5) },
+    };
+    expect(executeDeclarationInstantiation(source, ["answer"])).toEqual(expected);
+    const results = [filterSafePasses(allASTPasses), allASTPasses].map((passes) => {
+      const result = runPipelineWithReport(source, passes, [formatPass]);
+      const initializers: boolean[] = [];
+      traverse(parse(result.code), {
+        VariableDeclarator(path: { node: t.VariableDeclarator; parentPath: any }) {
+          if (t.isIdentifier(path.node.id, { name: "x" }) && path.parentPath.isVariableDeclaration({ kind: "var" })) {
+            initializers.push(path.node.init !== null);
+          }
+        },
+      });
+      return { outcome: executeDeclarationInstantiation(result.code, ["answer"]), initializers, warnings: result.warnings };
+    });
+    expect(results).toEqual([0, 1].map(() => ({ outcome: expected, initializers: [true], warnings: [] })));
+  });
+
+  it.each([
+    {
+      id: "var-catch",
+      source: "try{throw 0}catch(x){if(false){var x=1;}} globalThis.answer=x;",
+      name: "x", declarationKind: "var", answer: undefined,
+    },
+    {
+      id: "function-parameter",
+      source: "function outer(){function used(used){return 7;}globalThis.answer=used();}outer();",
+      name: "used", declarationKind: "function", answer: 7,
+    },
+  ])("binding ownership through both production compositions: $id", ({ source, name, declarationKind, answer }) => {
+    const expected: DeclarationInstantiationOutcome = {
+      completion: "normal", errorName: null,
+      globals: { answer: declarationInstantiationValue(answer) },
+    };
+    expect(executeDeclarationInstantiation(source, ["answer"])).toEqual(expected);
+    const lists = [filterSafePasses(allASTPasses), allASTPasses];
+    const results = lists.map((passes) => {
+      const result = runPipelineWithReport(source, passes, [formatPass]);
+      const declarations: string[] = [];
+      traverse(parse(result.code), {
+        VariableDeclarator(path: { node: t.VariableDeclarator; parentPath: any; scope: any }) {
+          if (t.isIdentifier(path.node.id, { name }) && path.parentPath.isVariableDeclaration()) {
+            declarations.push(path.parentPath.node.kind);
+          }
+        },
+        FunctionDeclaration(path: { node: t.FunctionDeclaration; scope: any }) {
+          if (path.node.id?.name === name) declarations.push("function");
+        },
+      });
+      return {
+        outcome: executeDeclarationInstantiation(result.code, ["answer"]),
+        declarations, warnings: result.warnings,
+      };
+    });
+    expect(lists.map((passes) => passes.filter((pass) => pass === deadCodeEliminatePass).length)).toEqual([3, 3]);
+    expect(allASTPasses.map((pass) => pass.name)).toEqual([
+      "bundler-unpack", "constant-fold", "constant-propagate", "dead-code-eliminate",
+      "hex-decode", "string-array-static", "string-array", "control-flow-object",
+      "control-flow-unflatten", "constant-fold", "dead-code-eliminate", "anti-debug",
+      "constant-propagate", "dead-code-eliminate", "ast-simplify", "semantic-rename", "ast-rename",
+    ]);
+    expect(lists[0]).toEqual(allASTPasses.filter((pass) => pass.name !== "string-array"));
+    expect(results).toEqual(lists.map((passes) => ({
+      outcome: expected, declarations: [declarationKind], warnings: [],
+    })));
+  });
+
+  it("flattens the exact selected var branch through both production compositions", () => {
+    const source = "function probe(){if(true){var selected=7;}globalThis.answer=selected;}probe();";
+    const expected: DeclarationInstantiationOutcome = {
+      completion: "normal", errorName: null,
+      globals: { answer: declarationInstantiationValue(7) },
+    };
+    expect(executeDeclarationInstantiation(source, ["answer"])).toEqual(expected);
+    const results = [filterSafePasses(allASTPasses), allASTPasses].map((passes) => {
+      const result = runPipelineWithReport(source, passes, [formatPass]);
+      return {
+        outcome: executeDeclarationInstantiation(result.code, ["answer"]),
+        branches: declarationTypeCount(result.code, "IfStatement"), warnings: result.warnings,
+      };
+    });
+    expect(results).toEqual([0, 1].map(() => ({ outcome: expected, branches: 0, warnings: [] })));
+  });
+
+  it("preserves the block let TDZ after return in isolation and both production compositions", () => {
+    const source = "function probe(){{globalThis.answer=typeof h;return;let h;}}probe();";
+    const expected: DeclarationInstantiationOutcome = {
+      completion: "throw", errorName: "ReferenceError", globals: { answer: { present: false } },
+    };
+    expect(executeDeclarationInstantiation(source, ["answer"])).toEqual(expected);
+    const outputs = [
+      { code: directCode(source), warnings: [] },
+      ...[filterSafePasses(allASTPasses), allASTPasses].map((passes) =>
+        runPipelineWithReport(source, passes, [formatPass])),
+    ];
+    const results = outputs.map(({ code, warnings }) => {
+      const declarations: string[] = [];
+      traverse(parse(code), {
+        VariableDeclarator(path: { node: t.VariableDeclarator; parentPath: any; scope: any }) {
+          if (t.isIdentifier(path.node.id, { name: "h" }) && path.parentPath.isVariableDeclaration()) {
+            declarations.push(path.parentPath.node.kind);
+          }
+        },
+      });
+      return { outcome: executeDeclarationInstantiation(code, ["answer"]), declarations, warnings };
+    });
+    expect(results).toEqual([0, 1, 2].map(() => ({ outcome: expected, declarations: ["let"], warnings: [] })));
+  });
+
   it("var declarator declaring scope composition: catch_parameter_discarded_consequent", () => {
     const source = "try{throw 0}catch(x){if(false){var x=f();}} globalThis.answer=x;";
     const expected: DeclarationInstantiationOutcome = {

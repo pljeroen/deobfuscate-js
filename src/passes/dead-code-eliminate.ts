@@ -131,7 +131,10 @@ export const deadCodeEliminatePass: ASTPass = {
           const id = decl.get("id");
           if (!id.isIdentifier()) continue;
 
-          const binding = decl.scope.getBinding(id.node.name);
+          const declarationScope = path.node.kind === "var"
+            ? decl.scope.getFunctionParent() ?? decl.scope.getProgramParent()
+            : decl.scope;
+          const binding = declarationScope.getBinding(id.node.name);
           if (!binding || facts.observed(binding)) continue;
 
           // Only remove if no references
@@ -140,6 +143,13 @@ export const deadCodeEliminatePass: ASTPass = {
 
           // Check if initializer has side effects
           const init = decl.get("init");
+          // A var initializer can write a distinct lexical cell, such as a catch parameter.
+          if (path.node.kind === "var" && init.node) {
+            const initializerTarget = decl.scope.getBinding(id.node.name);
+            if (!initializerTarget || facts.observed(initializerTarget)) continue;
+            if (initializerTarget.referencePaths.length > 0) continue;
+            if (initializerTarget.constantViolations.length > 0) continue;
+          }
           if (init.node && (!facts.intrinsicReadsSafe(init) || !isPure(init.node, isNested))) continue;
 
           toRemove.push(i);
@@ -174,7 +184,7 @@ export const deadCodeEliminatePass: ASTPass = {
         if (!path.isInStrictMode() && (parent.isSwitchCase() || (parent.isBlockStatement() && !isFunctionBody))) {
           return;
         }
-        const binding = path.scope.getBinding(path.node.id.name);
+        const binding = parent.scope.getBinding(path.node.id.name);
         if (!binding || facts.observed(binding)) return;
         if (binding.referencePaths.length > 0) return;
         if (binding.constantViolations.length > 0) return;
